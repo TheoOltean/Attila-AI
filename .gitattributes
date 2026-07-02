@@ -1,1 +1,4 @@
+# Windows line endings (CRLF) for everything; repo stores normalized LF
 * text=auto eol=crlf
+# shell scripts must stay LF or bash in WSL breaks on them
+*.sh text eol=lf

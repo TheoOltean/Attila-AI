@@ -1,1 +1,7 @@
 cluade-codex/
+
+# local docs/notes
+*.md
+
+# vanilla/TDD scripts extracted from the game packs (regenerate: tools/packtool.py)
+reference/
