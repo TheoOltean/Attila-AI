@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build attila_ai.pack (PFH4 mod pack) from pack_src/ and install it
-into the game's data folder.
+"""Build attila_ai.pack (PFH4 mod pack) and install it into the game's data folder.
 
-The pack only carries the two loader shims; the real scripts live loose in
-data/script via the junction, so they can be edited without rebuilding.
+The pack is self-contained: the loader shims from pack_src/ plus every
+project script from src/ (packed under aai\\, where the shims' require
+path data/aai/?.lua resolves inside the pack). To apply script changes:
+rebuild the pack, then restart the game (packs are read at boot).
 
 Usage: python3 tools/build_pack.py
 """
@@ -13,6 +14,7 @@ import sys
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK_SRC = os.path.join(PROJECT, "pack_src")
+SCRIPT_SRC = os.path.join(PROJECT, "src")
 GAME_DATA = "/mnt/c/Program Files (x86)/Steam/steamapps/common/Total War Attila/data"
 # sorts before tdd_pack0: among same-type packs, alphabetically first wins conflicts
 PACK_NAME = "attila_ai.pack"
@@ -27,12 +29,15 @@ TIMESTAMP = 1751500000
 
 def collect_files():
     entries = []
-    for root, _, files in os.walk(PACK_SRC):
-        for fname in sorted(files):
-            full = os.path.join(root, fname)
-            rel = os.path.relpath(full, PACK_SRC).replace("/", "\\")
-            with open(full, "rb") as f:
-                entries.append((rel, f.read()))
+    for src_root, prefix in ((PACK_SRC, ""), (SCRIPT_SRC, "aai")):
+        for root, _, files in os.walk(src_root):
+            for fname in sorted(files):
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, src_root)
+                if prefix:
+                    rel = os.path.join(prefix, rel)
+                with open(full, "rb") as f:
+                    entries.append((rel.replace("/", "\\"), f.read()))
     entries.sort(key=lambda e: e[0].lower())
     return entries
 

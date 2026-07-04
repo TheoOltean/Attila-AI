@@ -135,12 +135,12 @@ require("slavs/wonder");
 
 output("**** Attila-AI: vanilla main_attila hook active ****");
 
-package.path = package.path .. ";data/script/?.lua";
+package.path = package.path .. ";data/aai/?.lua";
 
-local aai_ok, aai_err = pcall(require, "attila_ai_main");
+local aai_ok, aai_err = pcall(require, "aai_campaign");
 
 if not aai_ok then
-	output("**** Attila-AI: FAILED to load attila_ai_main.lua: " .. tostring(aai_err) .. " ****");
+	output("**** Attila-AI: FAILED to load aai_campaign.lua: " .. tostring(aai_err) .. " ****");
 	local aai_f = io.open("data/attila_ai_log.txt", "a");
 	if aai_f then
 		aai_f:write("LOADER ERROR (vanilla scripting.lua): " .. tostring(aai_err) .. "\n");
