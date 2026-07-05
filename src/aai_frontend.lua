@@ -14,4 +14,13 @@ core.log_header("frontend world loaded");
 
 core.load_modules({
 	"frontend/probe",
+	"frontend/spawn_viz",
 });
+
+-- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the
+-- pack) is loaded if present - script iteration without pack rebuilds
+local dev_ok, dev = pcall(require, "aai_dev");
+if dev_ok and type(dev) == "table" and type(dev.init) == "function" then
+	pcall(dev.init, core);
+	core.log("dev hook: loose aai_dev.lua loaded");
+end;

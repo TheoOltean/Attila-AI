@@ -14,4 +14,6 @@ core.log_header("battle script state loaded (custom battlefield hook)");
 
 core.load_modules({
 	"battle/telemetry",
+	"battle/state_json",
+	"battle/ai_link",
 });

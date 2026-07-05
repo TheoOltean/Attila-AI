@@ -16,4 +16,13 @@ core.load_modules({
 	"campaign/probe",
 	"campaign/battle_script",
 	"campaign/camera",
+	"campaign/state_json",
 });
+
+-- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the
+-- pack) is loaded if present - script iteration without pack rebuilds
+local dev_ok, dev = pcall(require, "aai_dev");
+if dev_ok and type(dev) == "table" and type(dev.init) == "function" then
+	pcall(dev.init, core);
+	core.log("dev hook: loose aai_dev.lua loaded");
+end;

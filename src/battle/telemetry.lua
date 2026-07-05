@@ -30,10 +30,18 @@ local RETRY_EVENTS = {
 local function read(obj, method, ...)
 	local args = { ... };
 	local ok, value = pcall(function() return obj[method](obj, unpack(args)); end);
-	if ok then
-		return value;
+	if not ok then
+		return nil;
 	end;
-	return nil;
+	if type(value) == "function" then
+		-- bound getter instead of value (Attila interface quirk)
+		local ok2, value2 = pcall(value);
+		if ok2 then
+			return value2;
+		end;
+		return nil;
+	end;
+	return value;
 end;
 
 local function fmt_num(value, width, decimals)
@@ -124,6 +132,11 @@ end;
 function M.init(core)
 	local started = false;
 
+	local bless = rawget(_G, "aai_bless");
+	if bless then
+		bless(read);
+	end;
+
 	-- self-rescheduling tick on the battle manager's callback system;
 	-- stops itself once the battle completes
 	local function tick()
@@ -205,13 +218,8 @@ function M.init(core)
 	if ev.BattleCompleted then
 		ev.BattleCompleted[#ev.BattleCompleted + 1] =
 			core.guarded("telemetry BattleCompleted", function()
+				-- flag only: engine calls are broken in event context
 				phase = "complete";	-- tick sees this and stops rescheduling
-				if battle and not bm then
-					pcall(function() battle:unregister_timer(TIMER_NAME); end);
-				end;
-				if started then
-					snapshot();
-				end;
 			end);
 	end;
 end;
