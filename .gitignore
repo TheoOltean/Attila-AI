@@ -5,3 +5,4 @@ cluade-codex/
 
 # vanilla/TDD scripts extracted from the game packs (regenerate: tools/packtool.py)
 reference/
+mem/aai_scan_state.pkl

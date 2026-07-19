@@ -13,7 +13,6 @@ core.world = "frontend";
 core.log_header("frontend world loaded");
 
 core.load_modules({
-	"frontend/probe",
 	"frontend/spawn_viz",
 });
 

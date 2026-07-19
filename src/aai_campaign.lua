@@ -13,10 +13,9 @@ core.world = "campaign";
 core.log_header("campaign world loaded, time: " .. core.try("?", function() return os.date(); end));
 
 core.load_modules({
-	"campaign/probe",
-	"campaign/battle_script",
-	"campaign/camera",
-	"campaign/state_json",
+	-- BATTLE-ONLY (2026-07-12): campaign feed/telemetry modules removed; only the
+	-- battle launcher stays. The removed modules remain on disk under src/campaign/.
+	"campaign/battle_script",  -- KEEP: attaches aai/battle_entry.lua to every campaign battle
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the

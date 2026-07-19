@@ -1,0 +1,8 @@
+EXPORTS
+luaopen_aai
+aai_probe_unit
+aai_read_field
+aai_write_field
+aai_set_game_speed
+aai_snapshot
+aai_snapshot_reset

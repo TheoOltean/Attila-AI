@@ -13,7 +13,9 @@ local LOG_PATH = "data/attila_ai_log.txt";
 function M.log(text)
 	local f = io.open(LOG_PATH, "a");
 	if f then
-		f:write("[" .. M.world .. "] " .. tostring(text) .. "\n");
+		local ts = "";
+		pcall(function() ts = os.date("%H:%M:%S") .. " "; end);
+		f:write("[" .. M.world .. "] " .. ts .. tostring(text) .. "\n");
 		f:close();
 	end;
 end;
