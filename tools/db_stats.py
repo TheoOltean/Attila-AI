@@ -27,10 +27,16 @@ DB binary row format (per RPFM):
 """
 import struct, sys, os, json
 
-DATA_PACK = "/mnt/c/Program Files (x86)/Steam/steamapps/common/Total War Attila/data/data.pack"
+_GAME_DATA = (
+    r"C:\Program Files (x86)\Steam\steamapps\common\Total War Attila\data"
+    if os.name == "nt"
+    else "/mnt/c/Program Files (x86)/Steam/steamapps/common/Total War Attila/data"
+)
+_PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PACK = os.path.join(_GAME_DATA, "data.pack")
 OUT_PATHS = [
-    "/mnt/c/Program Files (x86)/Steam/steamapps/common/Total War Attila/data/aai_unit_stats.json",
-    "/mnt/c/Users/theod/programming/Attila-AI/reference/aai_unit_stats.json",
+    os.path.join(_GAME_DATA, "aai_unit_stats.json"),
+    os.path.join(_PROJECT, "reference", "aai_unit_stats.json"),
 ]
 
 # ---------------------------------------------------------------------------

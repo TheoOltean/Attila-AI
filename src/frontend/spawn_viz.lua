@@ -6,8 +6,8 @@
 
 local M = {};
 
-local CMD = 'start "" /min "C:\\Users\\theod\\AppData\\Local\\Programs\\Python\\Python313\\pythonw.exe" ' ..
-	'"C:\\Users\\theod\\programming\\Attila-AI\\viz\\aai_viz.py"';
+local CMD = 'start "" /min "C:\\Users\\Theoo\\AppData\\Local\\Programs\\Python\\Python313\\pythonw.exe" ' ..
+	'"C:\\Users\\Theoo\\programming\\Atilla-AI\\viz\\aai_viz.py"';
 
 function M.init(core)
 	local ok, code = pcall(os.execute, CMD);

@@ -1,8 +1,11 @@
 cluade-codex/
 
-# local docs/notes
+# local docs/notes/findings stay out of git — code only
 *.md
-
-# vanilla/TDD scripts extracted from the game packs (regenerate: tools/packtool.py)
 reference/
+
+# scan state / build artifacts
 mem/aai_scan_state.pkl
+*.pack
+__pycache__/
+*.pyc

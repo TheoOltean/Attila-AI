@@ -15,7 +15,13 @@ import sys
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK_SRC = os.path.join(PROJECT, "pack_src")
 SCRIPT_SRC = os.path.join(PROJECT, "src")
-GAME_DATA = "/mnt/c/Program Files (x86)/Steam/steamapps/common/Total War Attila/data"
+# Total War: Attila data/ folder. Native Windows path on this machine; the
+# /mnt/c form is the same location seen from WSL, so either machine works.
+GAME_DATA = (
+    r"C:\Program Files (x86)\Steam\steamapps\common\Total War Attila\data"
+    if os.name == "nt"
+    else "/mnt/c/Program Files (x86)/Steam/steamapps/common/Total War Attila/data"
+)
 # sorts before tdd_pack0: among same-type packs, alphabetically first wins conflicts
 PACK_NAME = "attila_ai.pack"
 
