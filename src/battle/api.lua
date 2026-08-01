@@ -96,7 +96,31 @@ local function unit_entry(unit, ai_alliance)
 		range = read(unit, "missile_range"),		-- 0 = melee; >0 = ranged
 		inf = read(unit, "is_infantry") and true or false,
 	};
-	if read(unit, "is_naval") then entry.naval = true; end;
+	-- naval paradigm (2026-07-28): the engine has no is_naval; has_ships() IS
+	-- the current-embarkment check, is_dismounted_ships() = naval unit ashore
+	if read(unit, "has_ships") then entry.naval = true; end;
+	if read(unit, "is_dismounted_ships") then entry.dships = true; end;
+	-- harness read-panel fields (all probe-verified T1, 2026-07-28)
+	entry.kills = read(unit, "number_of_enemies_killed");
+	entry.owidth = read(unit, "ordered_width");
+	entry.hidden = read(unit, "is_hidden") and true or false;
+	entry.valid_tgt = read(unit, "is_valid_target") and true or false;
+	entry.garrisoned = read(unit, "is_currently_garrisoned") and true or false;
+	entry.leaving = read(unit, "is_leaving_battle") and true or false;
+	entry.officer = vec(read(unit, "position_of_officer"));
+	-- the engine's own toggle vocabulary (binary parse table; the engine
+	-- accepts any string, so names earn their slot there or by effect;
+	-- hiding is passive -- is_hidden)
+	local st = {};
+	for _, b in ipairs({ "skirmish", "defend", "formed_attack", "unlimber",
+			"dismount", "release_animals", "drop_siege_equipment",
+			"abandon_artillery_engines", "board_ship",
+			"naval_fire_at_will" }) do
+		if read(unit, "is_behaviour_active", b) then
+			st[#st + 1] = b;
+		end;
+	end;
+	if #st > 0 then entry.stances = st; end;
 	local cls = read(unit, "unit_class");
 	if cls ~= nil then entry.cls = tostring(cls); end;
 	local car = read(unit, "can_perform_special_ability");
@@ -130,6 +154,12 @@ function M.read_state(opts)
 		t = opts.t or 0,
 		player_alliance = read(battle, "local_alliance"),
 	};
+	-- engine battle clock: authoritative under modify_battle_speed, unlike our
+	-- tick-derived t (Theo 07-29: t drifted visibly after a speed-up)
+	local rem = read(battle, "remaining_conflict_time");
+	if type(rem) == "number" then state.remaining = rem; end;
+	local bover = read(battle, "is_battle_over");
+	if bover ~= nil then state.over = bover and true or false; end;
 	local pa = state.player_alliance or 1;
 
 	local cam = read(battle, "camera");
@@ -171,6 +201,12 @@ function M.read_state(opts)
 			do
 				local ca = read(army, "is_commander_alive");
 				if ca ~= nil then army_out.commander_alive = ca and true or false; end;
+				-- naval observability: ship + reinforcement-ship counts (0 on
+				-- land battles; real numbers light up in a naval battle)
+				local sh = read(army, "ships");
+				if sh then army_out.ships = num(read(sh, "count")); end;
+				local rsh = read(army, "get_reinforcement_ships");
+				if rsh then army_out.reinf_ships = num(read(rsh, "count")); end;
 				local runits = read(army, "get_reinforcement_units");
 				if runits then
 					local rc = num(read(runits, "count"));
@@ -232,7 +268,7 @@ function M.buildings()
 end;
 
 -- Destroy the building nearest (x,z) -- the scripted stand-in for a ram/attack
--- on a wall/gate (BATTLE_API: rams have no command; scripts destroy directly).
+-- on a wall/gate (rams have no uc command; vanilla scripts destroy directly).
 function M.attack_building(x, z)
 	if not bridge or not bridge.attack_building then
 		return false, "no bridge";

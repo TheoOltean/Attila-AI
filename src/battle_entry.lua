@@ -23,6 +23,25 @@ end;
 log("");
 log("==== battle entry script running (custom battlefield hook) ====");
 
+-- ---- bisection levers (2026-07-27 loading-hang investigation) ----
+-- This battle-type hangs at the end of the loading screen with the mod on
+-- (vanilla loads it fine; native DLL + cmd handler already exonerated).
+-- Flag files in game data gate the remaining layers; they are read at every
+-- battle ENTRY, so tests iterate on battle reload alone -- no game restart.
+local function aai_flag(name)
+	local f = io.open("data/" .. name, "r");
+	if f then
+		f:close();
+		return true;
+	end;
+	return false;
+end;
+
+if aai_flag("aai_entry_lvl0.txt") then
+	log("LVL0 HOLLOW: script attached, nothing else runs");
+	return;
+end;
+
 local hdr_ok, hdr_err = pcall(require, "lua_scripts.Battle_Script_Header");
 if not hdr_ok then
 	log("Battle_Script_Header FAILED: " .. tostring(hdr_err));
@@ -38,9 +57,93 @@ else
 
 	-- battles with prepare_for_fade_in start black and trust the battle
 	-- script to fade in; harmless no-op everywhere else
-	pcall(function() bm:camera():fade(false, 1); end);
+	if aai_flag("aai_no_fade.txt") then
+		log("fade call SKIPPED (aai_no_fade.txt)");
+	else
+		pcall(function() bm:camera():fade(false, 1); end);
+	end;
 
 	log("battle manager acquired");
+
+	-- Instrument vanilla's own 100ms timer tick (lib_timer_manager registers
+	-- "tick_increment_counter" at bm creation). If aai_tick_count climbs
+	-- during combat the engine timer system is ALIVE and any dead feed is our
+	-- fault; if it stays 0 the whole script-timer system is dead in these
+	-- campaign-attached battles. Read the count from any live context.
+	rawset(_G, "aai_tick_count", 0);
+	if aai_flag("aai_no_shim.txt") then
+		log("tick shim SKIPPED (aai_no_shim.txt)");
+	else
+	pcall(function()
+		local orig = tick_increment_counter;	-- entry-env lookup (layered)
+		if type(orig) == "function" then
+			tick_increment_counter = function()
+				-- instrumentation fully pcall'd: this body runs INSIDE the
+				-- engine's timer dispatch -- an uncaught error here is a crash
+				pcall(function()
+					local n = (tonumber(rawget(_G, "aai_tick_count")) or 0) + 1;
+					rawset(_G, "aai_tick_count", n);
+					if n <= 10 or n % 100 == 0 then
+						log("vanilla tick " .. n .. " clock=" .. tostring(os.clock()));
+					end;
+					-- PUMP DRIVER: ride vanilla's dispatch slot -- registering
+					-- our own engine timers kills the whole dispatch (see
+					-- battle/publish.lua). True engine-timer context, engine
+					-- reads work here. n >= 50 keeps the pump out of the first
+					-- 5 s of the load window; pump_core limits 100ms -> ~500ms.
+					if n >= 50 then
+						local k = rawget(_G, "aai_pub_kick");
+						if k then
+							k("shim");
+						end;
+					end;
+				end);
+				return orig();
+			end;
+			rawset(_G, "tick_increment_counter", tick_increment_counter);
+			log("vanilla tick_increment_counter instrumented");
+		else
+			log("tick_increment_counter NOT FOUND (type=" .. type(orig) .. ")");
+		end;
+	end);
+	end;
+
+	-- BM:CALLBACK PROBE (data/aai_cb_probe.txt, THROWAWAY BATTLE ONLY):
+	-- answers the SCRIPTING.md open question -- is bm:callback (the
+	-- sanctioned periodic API, what the pre-port drivers and CA's own
+	-- scripted battles use) safe on this install, or the same poison as
+	-- register_repeating/singleshot_timer? A 5-shot self-rechaining
+	-- callback, first shot at +3 s. The shim's tick log around each
+	-- "CB PROBE fired" line shows whether the dispatch survived; each
+	-- shot also does one engine read to confirm the context is blessed.
+	-- If all 5 fire with ticks climbing: migrate drivers to bm:callback
+	-- and retire the shim. If ticks freeze: the shim stays, question closed.
+	if aai_flag("aai_cb_probe.txt") then
+		local cb_n = 0;
+		local function cb_chain()
+			pcall(function()
+				cb_n = cb_n + 1;
+				local la = "ERR";
+				pcall(function() la = tostring(bm:local_alliance()); end);
+				log("CB PROBE fired " .. cb_n .. "/5 ticks=" ..
+					tostring(rawget(_G, "aai_tick_count")) ..
+					" clock=" .. tostring(os.clock()) .. " read=" .. la);
+				if cb_n < 5 then
+					local ok2, err2 = pcall(function()
+						bm:callback(cb_chain, 2000, "aai_cb_probe");
+					end);
+					if not ok2 then
+						log("CB PROBE re-register ERR " .. tostring(err2));
+					end;
+				end;
+			end);
+		end;
+		local okc, errc = pcall(function()
+			bm:callback(cb_chain, 3000, "aai_cb_probe");
+		end);
+		log("CB PROBE registered=" .. tostring(okc) ..
+			(okc and "" or (" err=" .. tostring(errc))));
+	end;
 
 	local ok_id, batid = pcall(function() return os.date("%Y%m%d_%H%M%S"); end);
 	rawset(_G, "aai_battle_id", (ok_id and batid) or "battle");
@@ -489,7 +592,11 @@ end;
 
 package.path = package.path .. ";data/aai/?.lua";
 
-local aai_ok, aai_err = pcall(require, "aai_battle_state");
-if not aai_ok then
-	log("ENTRY FAILED: " .. tostring(aai_err));
+if aai_flag("aai_no_modules.txt") then
+	log("modules SKIPPED (aai_no_modules.txt)");
+else
+	local aai_ok, aai_err = pcall(require, "aai_battle_state");
+	if not aai_ok then
+		log("ENTRY FAILED: " .. tostring(aai_err));
+	end;
 end;

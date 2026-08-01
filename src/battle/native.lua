@@ -46,6 +46,16 @@ local function resolve(sym)
 end;
 
 function M.init(core)
+	-- A/B lever: data/aai_native_off.txt skips the DLL entirely (suspect
+	-- isolation for the 2026-07-27 dead-timer investigation)
+	local off = io.open("data/aai_native_off.txt", "r");
+	if off then
+		off:close();
+		if core then
+			core.log("native: SKIPPED (data/aai_native_off.txt present)");
+		end;
+		return;
+	end;
 	-- proof-of-life: luaopen_aai only appends a pid line to a file, no stack use
 	local open = resolve("luaopen_aai");
 	if open then
