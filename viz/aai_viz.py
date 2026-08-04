@@ -131,6 +131,9 @@ CAPEV_FILE = os.path.join(DATA, "aai_capev.json")
 ARMIES_FILE = os.path.join(DATA, "aai_armies.json")
 CAMP_ACK_FILE = os.path.join(DATA, "aai_camp_ack.json")
 CAMP_ORDER_FILE = os.path.join(DATA, "aai_camp_order.txt")
+# custom-battle attach lever (one-shot: attach_install.lua deletes it at
+# battle load BEFORE arming, so a crash can never repeat -- re-arm per battle)
+ATTACH_ARM_FILE = os.path.join(DATA, "aai_attach_arm.txt")
 
 
 def load_notes():
@@ -483,11 +486,17 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .tw.danger:hover{border-color:var(--atk);color:var(--atk)}
   .tw:disabled{opacity:.28;cursor:default}
   .hint{color:var(--dim);font-size:11px}
+  .armb{background:none;border:1px solid var(--line);border-radius:6px;color:var(--dim);
+    padding:3px 10px;font:inherit;cursor:pointer}
+  .armb.on{border-color:var(--gold);color:var(--gold)}
 </style></head><body>
 <div id="top">
   <h1>AAI BATTLE</h1>
   <a href="/harness" style="color:var(--dim);border:1px solid var(--line);border-radius:6px;
     padding:3px 10px;text-decoration:none">harness</a>
+  <button id="armbtn" class="armb" title="arm the NEXT custom battle: the battle script
+attaches at load and this cockpit goes live (one-shot lever - it clears itself when the
+battle loads; re-arm before each battle)">arm attach</button>
   <span class="meta" id="status"></span>
 </div>
 <div id="main" style="height:calc(100% - 46px)">
@@ -724,10 +733,26 @@ function updateStatus(st){
     ' · units <b>'+allUnits(st).length+'</b> · age '+battleAge+'s';
 }
 
+// ---- attach arming (custom battles) ----
+var armed=false, armBtn=document.getElementById("armbtn");
+function showArmed(a){
+  armed=!!a;
+  armBtn.className="armb"+(armed?" on":"");
+  armBtn.textContent=armed?"armed - next battle attaches":"arm attach";
+}
+armBtn.addEventListener("click",function(){
+  fetch("/attach_arm",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({on:!armed})})
+    .then(function(r){return r.json();})
+    .then(function(d){ if(d&&d.ok) showArmed(d.armed); })
+    .catch(function(){});
+});
+
 // ---- live polling ----
 function poll(){
   fetch("/state",{cache:"no-store"}).then(function(r){return r.json();}).then(function(d){
     var inc=d.battle; battleAge=(d.battle_age==null?99:d.battle_age);
+    if(d.armed!==undefined&&d.armed!==armed) showArmed(d.armed);
     if(!inc){ state=null; }
     else if(allUnits(inc).length>0 || !state || allUnits(state).length===0 || inc.phase==="complete"){
       state=inc;                    // accept real frames, first frame, or battle-end
@@ -2890,7 +2915,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/state":
             pump_orders()
             battle, age = read_json(BATTLE_FILE)
-            self._send(json.dumps({"battle": battle, "battle_age": age}))
+            self._send(json.dumps({"battle": battle, "battle_age": age,
+                                   "armed": os.path.exists(ATTACH_ARM_FILE)}))
         elif p == "/geometry":
             geo, age = read_json(GEOMETRY_FILE)
             self._send(json.dumps(geo if geo else {}))
@@ -2921,7 +2947,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path not in ("/verdict", "/test_order", "/notes", "/camp_order"):
+        if self.path not in ("/verdict", "/test_order", "/notes", "/camp_order",
+                             "/attach_arm"):
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -2932,6 +2959,17 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/verdict":
                 save_verdict(req)
                 self._send(json.dumps({"ok": True}))
+            elif self.path == "/attach_arm":
+                if req.get("on"):
+                    with open(ATTACH_ARM_FILE, "w", encoding="utf-8") as f:
+                        f.write("arm\n")
+                else:
+                    try:
+                        os.remove(ATTACH_ARM_FILE)
+                    except OSError:
+                        pass
+                self._send(json.dumps(
+                    {"ok": True, "armed": os.path.exists(ATTACH_ARM_FILE)}))
             elif self.path == "/notes":
                 save_notes(req.get("text", ""))
                 self._send(json.dumps({"ok": True}))
