@@ -51,6 +51,21 @@ function M.init(core)
 		return;
 	end;
 
+	-- Stamp this (bootstrap) world's globals-table identity + a marker. The
+	-- chunk logs the same two things. Identical tostring(_G), or the marker
+	-- being visible there, proves the chunk ran on the BOOTSTRAP globals table
+	-- rather than a private registrar-populated sandbox -- which is the direct
+	-- explanation for run 1's missing battle API.
+	pcall(function()
+		rawset(_G, "aai_bootstrap_marker", "set-by-attach_install");
+		local m = io.open("data/aai_attach_install.txt", "a");
+		if m then
+			m:write("  bootstrap _G = " .. tostring(_G)
+				.. "  (chunk should print the same if it shares this table)\n");
+			m:close();
+		end;
+	end);
+
 	local ran, e = pcall(arm);
 	if ran then
 		core.log("ATTACH-ARM fired -- see data/aai_attach_install.txt;"
