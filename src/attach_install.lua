@@ -25,6 +25,10 @@ function M.init(core)
 	end;
 	local lever = io.open("data/aai_attach_arm.txt", "r");
 	if not lever then
+		-- say so: a battle that loads vanilla because nobody armed looks
+		-- identical to a broken attach unless this line is in the log
+		core.log("attach_install: lever absent -- not arming (cockpit arm "
+			.. "button or data/aai_attach_arm.txt)");
 		return;
 	end;
 	lever:close();
