@@ -14,6 +14,8 @@ core.log_header("frontend world loaded");
 
 core.load_modules({
 	"frontend/spawn_viz",
+	"menu_probe",  -- VM census + native-door test (custom-battle setup
+	--   lives in this world). DEFAULT-OFF: gates on data/aai_menu_probe.txt.
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the
