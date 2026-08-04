@@ -1,24 +1,42 @@
 -------------------------------------------------------------------------
 --	ATTILA-AI attached chunk (branch custom-battles, Door B Route A).
---	NOT a module: the ENGINE loads and runs this file by name into the
---	script-interface env, once the attach gate sees a non-empty path at
---	BATTLE+0x64128. Engine path: "data/aai/aai_attach.lua".
+--	NOT a module: the ENGINE loads and runs this by name into the script
+--	interface, once the attach gate sees a non-empty BATTLE+0x64128.
 --
---	RUN 1 (2026-08-04) proved the attach works but landed us in an
---	UNPRIVILEGED env: the same 49 globals as the bootstrap world, and
---	getmetatable(_G) == nil. This version answers WHY, and whether the
---	battle API shows up later.
+--	RUN 1: attach works; env was the plain bootstrap surface.
+--	RUN 2: proved WHY -- we run on the BOOTSTRAP globals table
+--	  (identical tostring(_G), marker visible, decoda_name="Parent State"),
+--	  so no private sandbox was installed for us. BUT the registrar DID run:
+--	  the shared Lua registry grew 5 -> 32 entries and now holds the battle
+--	  API metatables (empire_battle, battle.unit(s), battle.army/armies,
+--	  battle.alliance(s), battle.unit_controller, battle.camera, ...).
+--	  Registry is shared by every thread of the state, so it is reachable
+--	  from right here.
 --
---	Still observe-only. Deliberately:
---	  * NO global named `ClearEventCallbacks` (the interface destructor
---	    looks that name up and CALLS it during teardown).
---	  * NO engine timers (ours once killed the vanilla timer dispatch).
---	  * no writes to engine state.
+--	RUN 3 goals, in order of value:
+--	  A. EVENTS DONE RIGHT. Run 2 registered on only 24 arbitrary (hash
+--	     order) events and none fired. Register on ALL of them; an event
+--	     context carries live battle userdata, which would give us the API
+--	     without ever needing the privileged globals.
+--	  B. Find the PRIVILEGED globals table: walk every registry value, and
+--	     any thread found there, for a table that actually contains
+--	     empire_battle as a key.
+--	  C. Map the API surface: dump the registry metatables' __index method
+--	     tables, so we know what we can call once we hold an instance.
+--
+--	Still observe-only: no engine writes, no timers, no global named
+--	ClearEventCallbacks.
 -------------------------------------------------------------------------
 
 local LOG = "data/aai_attach_chunk.txt";
+local BUDGET = 1200;			-- hard cap on log lines; events can be chatty
 
+local lines = 0;
 local function w(line)
+	if lines >= BUDGET then
+		return;
+	end;
+	lines = lines + 1;
 	local f = io.open(LOG, "a");
 	if f then
 		f:write(tostring(line) .. "\n");
@@ -26,7 +44,6 @@ local function w(line)
 	end;
 end;
 
--- never let this chunk raise: an error here aborts the engine's load
 local function try(tag, fn)
 	local ok, err = pcall(fn);
 	if not ok then
@@ -35,166 +52,182 @@ local function try(tag, fn)
 end;
 
 local BATTLE_NAMES = { "empire_battle", "battle_vector", "battle_manager",
-	"get_bm", "bm", "battle", "tick_increment_counter", "UIComponent",
-	"conditions", "effect" };
+	"get_bm", "bm", "battle", "tick_increment_counter", "UIComponent" };
 
-local function api_present()
+local function api_hits(t)
 	local hits = {};
 	for i = 1, #BATTLE_NAMES do
-		if rawget(_G, BATTLE_NAMES[i]) ~= nil then
+		local ok, v = pcall(rawget, t, BATTLE_NAMES[i]);
+		if ok and v ~= nil then
 			hits[#hits + 1] = BATTLE_NAMES[i];
 		end;
 	end;
 	return hits;
 end;
 
-local function count_globals()
+local function snapshot(tag)
+	local hits = api_hits(_G);
 	local n = 0;
 	for _ in pairs(_G) do
 		n = n + 1;
 	end;
-	return n;
-end;
-
-local function snapshot(tag)
-	local hits = api_present();
-	w("  [" .. tag .. "] _G=" .. tostring(_G) .. " raw_keys=" .. count_globals()
-		.. " mt=" .. type(getmetatable(_G))
-		.. " battle_api=" .. (#hits > 0 and table.concat(hits, ",") or "NONE"));
+	w("  [" .. tag .. "] _G=" .. tostring(_G) .. " keys=" .. n
+		.. " api=" .. (#hits > 0 and table.concat(hits, ",") or "NONE"));
 end;
 
 w("");
-w("==== aai_attach.lua RUN 2 ====");
+w("==== aai_attach.lua RUN 3 ====");
 try("time", function() w("time: " .. os.date("%Y-%m-%d %H:%M:%S")); end);
-
--- 1. WHICH globals table are we on? The bootstrap module stamps its own
--- tostring(_G) and a marker into data/aai_attach_install.txt. If the marker
--- is visible here, we are sharing the BOOTSTRAP globals table (a lua_newthread
--- shares globals in 5.1 unless the engine installs a private env), which is
--- the direct explanation for the missing sandbox + missing API.
 snapshot("load");
-w("  bootstrap marker visible = "
-	.. tostring(rawget(_G, "aai_bootstrap_marker")));
 
--- 2. the Lua registry: does the interface env register anything we can reach?
-try("registry", function()
-	local dbg = rawget(_G, "debug");
-	if type(dbg) ~= "table" or type(dbg.getregistry) ~= "function" then
-		w("  registry: debug.getregistry unavailable");
-		return;
-	end;
-	local reg = dbg.getregistry();
-	local nk, skeys = 0, {};
-	for k in pairs(reg) do
-		nk = nk + 1;
-		if type(k) == "string" then
-			skeys[#skeys + 1] = k;
-		end;
-	end;
-	table.sort(skeys);
-	w("  registry: " .. nk .. " entries; string keys: "
-		.. table.concat(skeys, " "));
-	local loaded = reg._LOADED;
-	if type(loaded) == "table" then
-		local names = {};
-		for k in pairs(loaded) do
-			names[#names + 1] = tostring(k);
-		end;
-		table.sort(names);
-		w("  registry._LOADED: " .. table.concat(names, " "));
-	end;
-end);
-
--- 3. deep-dump the engine globals that might BE the door: what is in them?
-local function dump_table(name, depth)
-	local t = rawget(_G, name);
-	w("  " .. name .. " = " .. type(t));
-	if type(t) ~= "table" then
-		return;
-	end;
-	local keys = {};
-	for k in pairs(t) do
-		keys[#keys + 1] = tostring(k);
-	end;
-	table.sort(keys);
-	w("    " .. #keys .. " keys");
-	local line = {};
-	for i = 1, #keys do
-		line[#line + 1] = keys[i] .. "(" .. type(t[keys[i]]) .. ")";
-		if #line == 6 or i == #keys then
-			w("      " .. table.concat(line, " "));
-			line = {};
-		end;
-		if i >= 60 then
-			w("      ...cut");
-			break;
-		end;
-	end;
-	local mt = getmetatable(t);
-	if mt and depth and depth > 0 then
-		w("    metatable = table");
-	end;
+local dbg = rawget(_G, "debug");
+local reg = nil;
+if type(dbg) == "table" and type(dbg.getregistry) == "function" then
+	reg = dbg.getregistry();
 end;
 
-for _, n in ipairs({ "events", "system", "package", "lookup", "udata_lookup",
-	"vfs", "defined" }) do
-	try("dump " .. n, function() dump_table(n, 1); end);
-end;
-try("scalars", function()
-	w("  CliExecute=" .. type(rawget(_G, "CliExecute"))
-		.. " RequireRegister=" .. type(rawget(_G, "RequireRegister"))
-		.. " decoda_name=" .. tostring(rawget(_G, "decoda_name")));
+-- ---- B. hunt the privileged globals table -----------------------------
+-- Any table anywhere in the registry that holds `empire_battle` IS the env
+-- the engine built for the interface. Also chase thread objects: a function
+-- on a thread's stack carries its environment via getfenv.
+try("hunt-env", function()
+	if not reg then
+		w("  hunt: no registry");
+		return;
+	end;
+	local seen, found = {}, 0;
+	local function consider(t, path)
+		if type(t) ~= "table" or seen[t] then
+			return;
+		end;
+		seen[t] = true;
+		local ok, v = pcall(rawget, t, "empire_battle");
+		if ok and v ~= nil then
+			found = found + 1;
+			w("  *** PRIVILEGED TABLE at " .. path .. " -> " .. tostring(t));
+			local names = {};
+			for k in pairs(t) do
+				names[#names + 1] = tostring(k);
+			end;
+			table.sort(names);
+			w("      " .. #names .. " keys: "
+				.. table.concat(names, " "):sub(1, 900));
+		end;
+	end;
+	for k, v in pairs(reg) do
+		local key = tostring(k);
+		consider(v, "reg[" .. key .. "]");
+		if type(v) == "table" then
+			for k2, v2 in pairs(v) do
+				consider(v2, "reg[" .. key .. "][" .. tostring(k2) .. "]");
+			end;
+		elseif type(v) == "thread" then
+			w("  registry thread at reg[" .. key .. "] -> " .. tostring(v));
+			-- functions live on the thread's stack; their fenv is its globals
+			for lvl = 0, 12 do
+				local ok, info = pcall(dbg.getinfo, v, lvl, "f");
+				if not ok or type(info) ~= "table" or info.func == nil then
+					break;
+				end;
+				local ok2, env = pcall(getfenv, info.func);
+				if ok2 and type(env) == "table" then
+					consider(env, "fenv(reg[" .. key .. "] lvl " .. lvl .. ")");
+				end;
+			end;
+		end;
+	end;
+	w("  hunt: " .. found .. " privileged table(s) found");
 end);
 
--- 4. the native door from THIS env (proves we can do native work from the
--- attached chunk, which is how any future env-fixing would be driven).
-try("native", function()
-	local ok, fn = pcall(package.loadlib, "data\\aai_native.dll", "luaopen_aai");
-	w("  package.loadlib -> " .. type(fn));
-	if type(fn) == "function" then
-		w("  luaopen_aai call ok = " .. tostring(pcall(fn)));
+-- ---- C. map the API surface we already hold ---------------------------
+try("api-surface", function()
+	if not reg then
+		return;
+	end;
+	local want = { "empire_battle", "battle.units", "battle.unit",
+		"battle.armies", "battle.army", "battle.alliances",
+		"battle.unit_controller", "battle_vector" };
+	for i = 1, #want do
+		local v = rawget(reg, want[i]);
+		w("  reg[\"" .. want[i] .. "\"] = " .. type(v));
+		if type(v) == "table" then
+			local keys = {};
+			for k in pairs(v) do
+				keys[#keys + 1] = tostring(k);
+			end;
+			table.sort(keys);
+			w("    keys: " .. table.concat(keys, " "):sub(1, 700));
+			local idx = rawget(v, "__index");
+			w("    __index = " .. type(idx));
+			if type(idx) == "table" then
+				local mk = {};
+				for k in pairs(idx) do
+					mk[#mk + 1] = tostring(k);
+				end;
+				table.sort(mk);
+				w("    METHODS(" .. #mk .. "): "
+					.. table.concat(mk, " "):sub(1, 900));
+			end;
+		end;
 	end;
 end);
 
--- 5. THE TIMING QUESTION: does the battle API appear LATER? The env has an
--- `events` table; register on everything we can and re-snapshot when one
--- fires. Registration shape is unknown, so try the plausible ones and log
--- which worked. Nothing here touches battle state.
-try("listen", function()
+-- ---- A. events: register on EVERYTHING --------------------------------
+-- An event context carries live battle userdata. If any fires we log the
+-- context's shape and its metatable -- that is the road into the API that
+-- does not depend on globals at all.
+try("listen-all", function()
 	local ev = rawget(_G, "events");
 	if type(ev) ~= "table" then
 		w("  listen: no events table");
 		return;
 	end;
-	local fired = {};
-	local registered, attempted = 0, 0;
+	local fired, nreg, ntried = {}, 0, 0;
 	for name, slot in pairs(ev) do
-		if attempted >= 24 then
-			break;
-		end;
-		attempted = attempted + 1;
-		local cb = function(...)
-			if not fired[name] then
-				fired[name] = true;
-				w("  EVENT FIRED: " .. tostring(name));
-				snapshot("event:" .. tostring(name));
+		ntried = ntried + 1;
+		local ename = tostring(name);
+		local cb = function(context)
+			if fired[ename] then
+				return;
+			end;
+			fired[ename] = true;
+			w("  EVENT " .. ename .. " ctx=" .. type(context));
+			snapshot("ev:" .. ename);
+			if type(context) == "table" or type(context) == "userdata" then
+				local mt = getmetatable(context);
+				w("    ctx metatable = " .. type(mt));
+				if type(mt) == "table" then
+					local mk = {};
+					for k in pairs(mt) do
+						mk[#mk + 1] = tostring(k);
+					end;
+					table.sort(mk);
+					w("    ctx mt keys: "
+						.. table.concat(mk, " "):sub(1, 500));
+					local idx = rawget(mt, "__index");
+					if type(idx) == "table" then
+						local ik = {};
+						for k in pairs(idx) do
+							ik[#ik + 1] = tostring(k);
+						end;
+						table.sort(ik);
+						w("    ctx METHODS: "
+							.. table.concat(ik, " "):sub(1, 700));
+					end;
+				end;
 			end;
 		end;
-		-- shape A: events.X is a list of callbacks
 		if type(slot) == "table" then
-			local ok = pcall(function() table.insert(slot, cb); end);
-			if ok then
-				registered = registered + 1;
+			if pcall(function() slot[#slot + 1] = cb; end) then
+				nreg = nreg + 1;
 			end;
-		-- shape B: events.X is a function that registers a listener
 		elseif type(slot) == "function" then
-			local ok = pcall(slot, cb);
-			if ok then
-				registered = registered + 1;
+			if pcall(slot, cb) then
+				nreg = nreg + 1;
 			end;
 		end;
 	end;
-	w("  listen: attempted " .. attempted .. ", registered " .. registered);
+	w("  listen: " .. ntried .. " events, registered on " .. nreg);
 end);
 
-w("==== end aai_attach.lua RUN 2 ====");
+w("==== end aai_attach.lua RUN 3 (events may append below) ====");
