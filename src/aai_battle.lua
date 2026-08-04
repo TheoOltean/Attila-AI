@@ -20,6 +20,9 @@ core.load_modules({
 	--   DEFAULT-OFF: self-gates on data/aai_reg_walk.txt.
 	"attach_probe",  -- Door B rung 3: READ-ONLY native probe of the attach
 	--   gate. DEFAULT-OFF: self-gates on data/aai_attach_on.txt.
+	"attach_install",  -- Route A: THE ONE WRITE (arms BATTLE+0x64128 so the
+	--   engine attaches our chunk itself). DEFAULT-OFF: data/aai_attach_arm.txt,
+	--   which it deletes BEFORE writing so a crash cannot repeat.
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the

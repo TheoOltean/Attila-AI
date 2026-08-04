@@ -656,6 +656,128 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
     return 0;
 }
 
+/* ===== ROUTE A INSTALLER: arm the attach string ========================
+ * THE ONE WRITE. Everything else in this file's attach work is read-only.
+ *
+ * What it does: copy a script path into the engine's own std::string at
+ * BATTLE+0x64128, using the ENGINE'S OWN copy-constructor, from the bootstrap
+ * Lua call site -- which runs at ctor line 203, i.e. BEFORE the attach gate at
+ * line 893 on the same thread. The engine then runs its own gate, its own
+ * operator new(0x440), its own interface ctor and its own publish, in its own
+ * order, at the moment it chose. On the first tick it loads our chunk into a
+ * privileged battle Lua thread.
+ *
+ * Why this is the safe shape: 0x100db350 reads only {size, ptr} from our
+ * struct (never cap) and hands off to 0x100d68a0, which allocates len+1 FROM
+ * THE ENGINE'S ALLOCATOR and byte-copies. So the engine owns the buffer and
+ * frees it with the ordinary std::string destructor at teardown. We pass no
+ * pointer the engine keeps, allocate nothing and free nothing. It is a
+ * copy-CONSTRUCTOR, so it does not free an existing value -- which is why
+ * precondition P4 (destination is the pristine {0,0,&empty_literal}) is not
+ * optional: it guarantees there is no allocation to leak. */
+#define VA_STR_COPYCTOR 0x100db350u   /* thiscall(dst)(const estr* src), ret 4 */
+
+typedef struct { unsigned size, cap; const char *ptr; } estr;
+
+/* MinGW has no __thiscall. __fastcall passes arg1 in ECX and arg2 in EDX with
+ * the remaining args pushed right-to-left and the CALLEE cleaning them -- which
+ * is bit-for-bit what MSVC __thiscall expects. The dummy EDX is never read. */
+typedef void *(__attribute__((__fastcall__)) *pfn_strcopy)(void *dst, void *edx,
+                                                           const estr *src);
+
+/* The engine path of our chunk: pack entry aai\aai_attach.lua is reached as
+ * data/aai/aai_attach.lua, the same way the bootstrap shim is loaded. Keep it
+ * SHORT: the path normaliser 0x100fb5b0 uses a fixed 2 KB stack buffer with no
+ * bounds check, so an overlong path is a stack smash rather than a truncation. */
+static const char AAI_CHUNK_PATH[] = "data/aai/aai_attach.lua";
+
+/* aai_attach_arm() -> nothing pushed. Report: data/aai_attach_install.txt.
+ * Refuses (writing nothing) unless every precondition passes. */
+__declspec(dllexport) int aai_attach_arm(void *L) {
+    FILE *f;
+    HMODULE base;
+    unsigned bias, vt_battle, vt_emplua, this_tid, n_stack;
+    unsigned raw[3] = { 0, 0, 0 }, len = 0, h = 0, hv = 0, empty_lit;
+    unsigned char guard = 0xff;
+    const void *B = NULL;
+    char pathbuf[512];
+    int have, ok_guard, ok_prist, ok_timing;
+    estr src;
+    pfn_strcopy copy;
+    static const void *armed_for;      /* one-shot per process, keyed on B */
+
+    (void)L;
+    f = fopen("data/aai_attach_install.txt", "a");
+    if (!f) return 0;
+    fprintf(f, "\n==== aai_attach_arm pid=%lu ====\n",
+            (unsigned long)GetCurrentProcessId());
+
+    base = GetModuleHandleA("empire.retail.dll");
+    if (!base) { fprintf(f, "  REFUSE: engine module not found\n"); fclose(f); return 0; }
+    bias      = (unsigned)(UINT_PTR)base - IMAGE_BASE;
+    vt_battle = VA_BATTLE_ENV_VTABLE + bias;
+    vt_emplua = VA_EMPIRELUAENV_VTABLE + bias;
+    empty_lit = VA_STR_EMPTY_LIT + bias;
+    this_tid  = GetCurrentThreadId();
+
+    /* P2: the stack anchor ONLY. A stale BATTLE_ENV keeps the same vtable and
+     * the same ctor thread id, so the address-space scan cannot exclude one --
+     * but a dead object is not referenced by our live frames. Anything other
+     * than exactly one is a refusal, never a "pick the first". */
+    n_stack = stack_scan(vt_battle, this_tid, &B, f);
+    if (n_stack != 1 || !B) {
+        fprintf(f, "  REFUSE: stack anchor found %u BATTLE_ENV (need exactly 1)\n",
+                n_stack);
+        fclose(f); return 0;
+    }
+    if (armed_for == B) {
+        fprintf(f, "  REFUSE: already armed for %p this process\n", B);
+        fclose(f); return 0;
+    }
+    fprintf(f, "  BATTLE_ENV = %p (stack-anchored)  bias=%08x\n", B, bias);
+
+    have     = rd_stdstr((const char *)B + OFF_B_SCRIPTPATH, pathbuf,
+                         sizeof(pathbuf), &len, raw);
+    ok_prist = have && raw[0] == 0 && raw[1] == 0 && raw[2] == empty_lit;
+    ok_guard = rd_u8((const char *)B + OFF_B_GUARD, &guard) && guard == 0;
+    rd_u32((const char *)B + OFF_B_BOOTENV, &h);
+    rd_u32((const void *)(UINT_PTR)h, &hv);
+    ok_timing = (hv != vt_emplua);
+
+    fprintf(f, "  P3 guard==0        : %s (%u)\n", ok_guard ? "PASS" : "FAIL", guard);
+    fprintf(f, "  P4 string PRISTINE : %s raw{%u,%u,%08x} want ptr %08x\n",
+            ok_prist ? "PASS" : "FAIL", raw[0], raw[1], raw[2], empty_lit);
+    fprintf(f, "  P5 pre-line-205    : %s\n", ok_timing ? "PASS" : "FAIL");
+    if (!ok_guard || !ok_prist || !ok_timing) {
+        fprintf(f, "  REFUSE: precondition failed -- nothing written\n");
+        fclose(f); return 0;
+    }
+
+    /* THE WRITE: one call into the engine's own std::string copy-ctor. */
+    src.size = (unsigned)(sizeof(AAI_CHUNK_PATH) - 1);
+    src.cap  = src.size;                  /* ignored; 0x100d68a0 sets cap:=size */
+    src.ptr  = AAI_CHUNK_PATH;            /* deep-copied by the engine */
+    copy = (pfn_strcopy)(void *)((char *)base + (VA_STR_COPYCTOR - IMAGE_BASE));
+    armed_for = B;                        /* set BEFORE the call: never retry */
+    fprintf(f, "  calling str_copyctor(%p, \"%s\")\n",
+            (const char *)B + OFF_B_SCRIPTPATH, AAI_CHUNK_PATH);
+    fflush(f);                            /* survive a fault at the call */
+    copy((char *)B + OFF_B_SCRIPTPATH, 0, &src);
+
+    /* read back through RPM -- never a raw deref */
+    if (rd_stdstr((const char *)B + OFF_B_SCRIPTPATH, pathbuf, sizeof(pathbuf),
+                  &len, raw) && len == src.size &&
+        strcmp(pathbuf, AAI_CHUNK_PATH) == 0)
+        fprintf(f, "  ARMED: raw{size=%u cap=%u ptr=%08x} \"%s\"\n"
+                   "  => the engine's own gate should now attach on this battle\n",
+                raw[0], raw[1], raw[2], pathbuf);
+    else
+        fprintf(f, "  *** READ-BACK FAILED raw{%u,%u,%08x} -- expect no attach\n",
+                raw[0], raw[1], raw[2]);
+    fclose(f);
+    return 0;
+}
+
 /* ===== DIFFERENTIAL MAPPER (in-process "gold hunt") =====================
  * Delta-encode the whole unit struct each tick: compare P[0..SNAP_LEN) to the
  * stored previous snapshot (per key) and log only the dwords that CHANGED, with
