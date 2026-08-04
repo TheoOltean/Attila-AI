@@ -153,6 +153,9 @@ function M.read_state(opts)
 		phase = opts.phase or "loading",
 		t = opts.t or 0,
 		player_alliance = read(battle, "local_alliance"),
+		-- battle identity: lets the cockpit drop building/engine scan
+		-- layers from a previous battle (stale-layer bug, 08-01)
+		battle_id = rawget(_G, "aai_battle_id"),
 	};
 	-- engine battle clock: authoritative under modify_battle_speed, unlike our
 	-- tick-derived t (Theo 07-29: t drifted visibly after a speed-up)

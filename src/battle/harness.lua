@@ -53,6 +53,7 @@ local cmd_names = {};	-- whole-battle census: order name -> count (never
 -- battlefield probe outputs + handle caches (bld/aeq indices are the handles
 -- the sieges verbs take -- run the probe verb first, then act by index)
 local BLD = "data/aai_bld.json";
+local AEQ = "data/aai_aeq.json";
 local CAPEV = "data/aai_capev.json";
 local bld_cache = {};
 local bld_rows = {};	-- accumulated dump rows across chunked bld calls
@@ -209,12 +210,63 @@ GLOBALS = {
 		-- 07-30 events-context precedent), a names-only walk survives a
 		-- cold registry and becomes the safe enumerator.
 		local mode = (a and tostring(a[2])) or "full";
-		if mode ~= "lite" and mode ~= "names" then
+		if mode ~= "lite" and mode ~= "names" and mode ~= "v1" then
 			mode = "full";
 		end;
 		local list = battle:buildings();
 		local ok_t, total = pcall(function() return list:count(); end);
 		if not ok_t or type(total) ~= "number" then total = 0; end;
+		if mode == "v1" then
+			-- The V1-mechanics scan: blind raw pcalls, full fields, NO
+			-- metatable census, NO cold bail, NO breadcrumbs -- the ONLY
+			-- call pattern that ever survived FRESH battles (01:43 twice
+			-- at ~70 s, the 3-hr 22:29 battle x5, and the byte-faithful
+			-- 300-clamp replica twice on the 08-01 fort battle, registry
+			-- warm at ~85 s, feed alive after). 08-01 EXTENSION (Theo:
+			-- "why is it not going farther"): cursor-driven -- each click
+			-- walks the NEXT <chunk> entries with the same blind
+			-- mechanics, restarting after the end. If a DEEP chunk kills
+			-- on an otherwise-warm map, the poison frontier (the empty
+			-- pool-slot region past the real architecture -- what the
+			-- all-29k walk crossed when it died at 01:55) is localized.
+			local scan = (type(total) == "number") and total or 0;
+			if bld_pos >= scan then	-- done (or empty): restart fresh
+				bld_pos = 0; bld_cache = {}; bld_rows = {};
+			end;
+			local from = bld_pos + 1;
+			local stop = bld_pos + chunk;
+			if stop > scan then stop = scan; end;
+			for i = from, stop do
+				local bo = list:item(i);
+				if bo then
+					-- keyed by REGISTRY index: rows carry e.i = i, so the
+					-- cockpit's click-to-attack (battk e.i) hits exactly
+					-- this piece even if some slots came back nil
+					bld_cache[i] = bo;
+					local e = { i = i };
+					pcall(function() e.name = tostring(bo:name()); end);
+					pcall(function()
+						local p = bo:central_position();
+						e.x = p:get_x(); e.y = p:get_y(); e.z = p:get_z();
+					end);
+					pcall(function() e.health = bo:health(); end);
+					pcall(function() e.garr = bo:is_garrisoned() and true or false; end);
+					pcall(function() e.cap = bo:capacity(); end);
+					pcall(function() e.owner = bo:alliance_owner_id(); end);
+					-- damage state (08-01, same blind-pcall class -- both
+					-- getters are on the building object's known list)
+					pcall(function() e.fire = bo:is_on_fire() and true or false; end);
+					pcall(function() e.dead = bo:is_destroyed() and true or false; end);
+					bld_rows[#bld_rows + 1] = e;
+				end;
+			end;
+			bld_pos = stop;
+			json.write(BLD, { total = total, scanned = bld_pos,
+				kept = #bld_rows, rows = bld_rows, clock = os.clock(),
+				battle_id = rawget(_G, "aai_battle_id") });
+			return "v1 " .. from .. "-" .. stop .. "/" .. tostring(scan)
+				.. " kept " .. tostring(#bld_rows);
+		end;
 		if bld_pos >= total then	-- done (or empty): restart fresh
 			bld_pos = 0; bld_cache = {}; bld_rows = {};
 		end;
@@ -290,7 +342,7 @@ GLOBALS = {
 		end;
 		json.write(BLD, { total = total, scanned = bld_pos, kept = #bld_rows,
 			cold_at = cold_at, cold_mt = cold_mt, clock = os.clock(),
-			rows = bld_rows });
+			battle_id = rawget(_G, "aai_battle_id"), rows = bld_rows });
 		if cold_at ~= nil then
 			return "COLD at " .. cold_at .. "/" .. total
 				.. " mt_keys=" .. tostring(cold_mt)
@@ -436,23 +488,125 @@ GLOBALS = {
 		return "step " .. step .. "/" .. #S .. " [" .. s[1] .. "] -> "
 			.. tostring(val) .. " vt=" .. vt;
 	end,
-	-- scripted building destroy by bld-cache index (run bld first)
-	bdestroyi = function(a)
-		local bo = bld_cache[tonumber(a[1]) or 0];
-		if not bo then error("run bld first / bad index"); end;
-		bo:destroy();
-	end,
-	-- assault equipment: cache items, ack val = engine count
+	-- (bdestroyi removed 2026-08-01 -- building:destroy() is an instant
+	-- scripted demolish = cheat-class battle-level write, out of scope;
+	-- the ORDERED attack_building unit verb (battk) stays)
+	-- SIEGE ENGINES probe (07-31, Theo's order): enumerate the assault
+	-- vehicles (rams/towers) into data/aai_aeq.json for the cockpit --
+	-- positions on the map + "claimed" = crewed/equipped by a unit. The
+	-- vehicle object's method surface was NEVER dumped (no battle had one
+	-- until tonight's count=4), so this probe SELF-DISCOVERS: VM-only
+	-- metatable census first, then it calls ONLY getters that exist,
+	-- each pcall'd + unwrap-guarded. Vehicle 1's full method list lands
+	-- in the JSON (`methods`) for RE. Handles cache into aeq_cache for
+	-- the occupy/interact verbs. Ack = count + how many gave positions +
+	-- how many read claimed.
 	aeq = function()
 		local eq = battle:assault_equipment();
 		local n2 = eq:vehicle_count();
 		aeq_cache = {};
 		local cnt = (type(n2) == "number") and n2 or 0;
 		if cnt > 40 then cnt = 40; end;
-		for i = 1, cnt do
-			pcall(function() aeq_cache[i] = eq:vehicle_item(i); end);
+		local function uread(o, m)
+			local ok, v = pcall(function() return o[m](o); end);
+			if not ok then
+				return nil;
+			end;
+			if type(v) == "function" then
+				local ok2, v2 = pcall(v);
+				if not ok2 then
+					return nil;
+				end;
+				v = v2;
+			end;
+			return v;
 		end;
-		return n2;
+		-- first existing getter (per the metatable census) returning the
+		-- wanted type
+		local function first(o, has, names, want)
+			for _, m in ipairs(names) do
+				if has[m] then
+					local v = uread(o, m);
+					if type(v) == want then
+						return v;
+					end;
+				end;
+			end;
+			return nil;
+		end;
+		local rows = {};
+		local methods = {};
+		for i = 1, cnt do
+			local ok_v, vo = pcall(function() return eq:vehicle_item(i); end);
+			if ok_v and type(vo) == "userdata" then
+				aeq_cache[#aeq_cache + 1] = vo;
+				local e = { i = #aeq_cache };
+				local has = {};
+				pcall(function()
+					local mt = debug.getmetatable(vo);
+					local ix = (type(mt) == "table")
+						and rawget(mt, "__index") or nil;
+					for _, t in ipairs({ mt, ix }) do
+						if type(t) == "table" then
+							for k, _ in pairs(t) do
+								has[tostring(k)] = true;
+							end;
+						end;
+					end;
+				end);
+				if #methods == 0 then
+					for k, _ in pairs(has) do
+						methods[#methods + 1] = k;
+					end;
+					table.sort(methods);
+				end;
+				e.name = first(vo, has,
+					{ "name", "vehicle_key", "key", "type" }, "string");
+				local p = first(vo, has,
+					{ "position", "central_position" }, "userdata");
+				if p ~= nil then
+					pcall(function()
+						e.x = p:get_x(); e.y = p:get_y(); e.z = p:get_z();
+					end);
+				end;
+				e.hp = first(vo, has, { "health", "hitpoints" }, "number");
+				e.owner = first(vo, has, { "alliance_owner_id",
+					"alliance_id", "owner_id", "owner" }, "number");
+				local cl = first(vo, has, { "is_occupied", "is_manned",
+					"is_crewed", "is_in_use", "has_crew",
+					"is_garrisoned" }, "boolean");
+				if cl ~= nil then
+					e.claimed = cl;
+				end;
+				-- unit-link getters: WHO claimed it, when the engine
+				-- exposes the crew unit
+				local cu = first(vo, has, { "occupying_unit",
+					"owning_unit", "unit" }, "userdata");
+				if cu ~= nil then
+					local un = uread(cu, "name");
+					local ut = uread(cu, "type");
+					e.by = tostring(un or "")
+						.. ((ut ~= nil) and (" " .. tostring(ut)) or "");
+					if e.claimed == nil then
+						e.claimed = true;
+					end;
+				end;
+				rows[#rows + 1] = e;
+			end;
+		end;
+		json.write(AEQ, { count = n2, rows = rows, methods = methods,
+			clock = os.clock(), battle_id = rawget(_G, "aai_battle_id") });
+		local npos, ncl = 0, 0;
+		for _, e in ipairs(rows) do
+			if e.x ~= nil then
+				npos = npos + 1;
+			end;
+			if e.claimed == true then
+				ncl = ncl + 1;
+			end;
+		end;
+		return tostring(n2) .. " engines, pos " .. npos
+			.. ", claimed " .. ncl;
 	end,
 	-- victory-point getter re-probe: acks what each candidate getter returns
 	-- (they probed nil pre-port; re-check live on THIS install)
@@ -472,23 +626,8 @@ GLOBALS = {
 		end;
 		return table.concat(out, " ");
 	end,
-	-- per-army ship + reinforcement-ship counts (Theo 07-29: a siege with
-	-- enemy naval reinforcements showed NO ships -- this acks the raw reads)
-	ships = function()
-		local out = {};
-		local als = battle:alliances();
-		for a = 1, als:count() do
-			local ars = als:item(a):armies();
-			for m = 1, ars:count() do
-				local army = ars:item(m);
-				local sc, rc = "ERR", "ERR";
-				pcall(function() sc = tostring(army:ships():count()); end);
-				pcall(function() rc = tostring(army:get_reinforcement_ships():count()); end);
-				out[#out + 1] = a .. ":" .. m .. "=s" .. sc .. "/r" .. rc;
-			end;
-		end;
-		return table.concat(out, " ");
-	end,
+	-- (ships / reinforcement probes removed 2026-08-01 -- Theo: "Dont need
+	-- this." on all five reinforcement/ships read lines)
 };
 
 local VERBS = {
@@ -716,6 +855,17 @@ function M.init(core)
 	if bless then
 		mkvec = bless(function(x, z) return v(x, z); end);
 	end;
+	-- clean slate on disk each battle (stale-layer bug 08-01: the cockpit
+	-- was rendering the PREVIOUS battle's building/engine scans): empty
+	-- files stamped with this battle's id, overwritten by real scans
+	-- (reverted to the 15:53-proven form during the 08-01 evening crash revert)
+	pcall(function()
+		local bid = rawget(_G, "aai_battle_id");
+		json.write(BLD, { total = 0, scanned = 0, kept = 0, rows = {},
+			battle_id = bid, clock = os.clock() });
+		json.write(AEQ, { count = 0, rows = {}, methods = {},
+			battle_id = bid, clock = os.clock() });
+	end);
 	-- phase flags only (context law) -- mirrors publish/probe wiring
 	local ev = rawget(_G, "events");
 	if type(ev) == "table" then
