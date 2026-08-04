@@ -16,6 +16,10 @@ core.load_modules({
 	-- BATTLE-ONLY (2026-07-12): campaign feed/telemetry modules removed; only the
 	-- battle launcher stays. The removed modules remain on disk under src/campaign/.
 	"campaign/battle_script",  -- KEEP: attaches aai/battle_entry.lua to every campaign battle
+	-- "campaign/spawner",  -- DISABLED 08-01 evening: full revert after the 17:37/18:29
+	-- crashes. Log forensics say spawner is likely innocent (ran clean 15:51 + a full
+	-- 15:53 battle; no grant ever fired; the 17:02 stats-file regen is the prime
+	-- suspect) -- re-enable one variable at a time once the baseline is stable.
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the
