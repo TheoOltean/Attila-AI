@@ -283,6 +283,7 @@ __declspec(dllexport) int aai_write_field(void *L) {
 #define VA_EMPIRELUAENV_VTABLE 0x11b64758u   /* stamped by ctor 0x10d5c160   */
 #define VA_SCRIPT_IFACE_SINGLE 0x11e63058u   /* published at 0x101af61b      */
 #define VA_EMPIRELUAENV_LIST   0x11cce44cu   /* registry container           */
+#define VA_STR_EMPTY_LIT       0x11e52f86u   /* what the default str ctor stores */
 
 #define OFF_B_CTOR_TID    0x34u      /* GetCurrentThreadId(), ctor line 91   */
 #define OFF_B_SETUPINFO   0x640e4u   /* BATTLE_SETUP_INFO copy (0x1d8 bytes) */
@@ -378,6 +379,64 @@ static void dump_bytes(FILE *f, const char *tag, const void *p, unsigned n) {
     }
 }
 
+/* Upper bound of this thread's stack. GetCurrentThreadStackLimits is Win8+, so
+ * it is resolved dynamically; the fallback derives the bound from the committed
+ * region containing a local. */
+static const void *stack_top(void) {
+    typedef void (WINAPI *pfn_limits)(ULONG_PTR *, ULONG_PTR *);
+    pfn_limits p = (pfn_limits)(void *)GetProcAddress(
+        GetModuleHandleA("kernel32.dll"), "GetCurrentThreadStackLimits");
+    if (p) {
+        ULONG_PTR lo = 0, hi = 0;
+        p(&lo, &hi);
+        if (hi) return (const void *)hi;
+    }
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        int here;
+        if (VirtualQuery(&here, &mbi, sizeof(mbi)) == sizeof(mbi))
+            return (const char *)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return NULL;
+}
+
+/* Scan OUR OWN thread stack for a spilled pointer to a live BATTLE_ENV.
+ *
+ * Why this beats the address-space scan: the BATTLE_ENV ctor is on our call
+ * stack right now -- it called the bootstrap Lua that called us -- and it spills
+ * its `this` repeatedly into its frame. A stack dword pointing at an object that
+ * passes the identity test is therefore THE ctor currently running. A stale
+ * BATTLE_ENV from an earlier battle keeps the same vtable and the same ctor
+ * thread id, so the heap scan cannot tell it apart; a stale object is not
+ * referenced by our live frames, so this can. Scans upward from a local (the
+ * ctor's frame is at HIGHER addresses, the stack grows down). */
+static unsigned stack_scan(unsigned vt_battle, unsigned this_tid,
+                           const void **first, FILE *f) {
+    const void *hi = stack_top();
+    int anchor;
+    const unsigned *p = (const unsigned *)(((UINT_PTR)&anchor) & ~3u);
+    unsigned found = 0, i;
+    const void *seen[8];
+    if (!hi || (const void *)p >= hi) return 0;
+    for (; (const void *)p < hi; p++) {
+        unsigned v, vt = 0, tid = 0;
+        if (!rpm(p, &v, 4)) break;           /* off the end of committed stack */
+        if (v < 0x10000u) continue;          /* not a plausible pointer */
+        if (!rd_u32((const void *)(UINT_PTR)v, &vt) || vt != vt_battle) continue;
+        if (!rd_u32((const char *)(UINT_PTR)v + OFF_B_CTOR_TID, &tid) ||
+            tid != this_tid) continue;
+        for (i = 0; i < found && i < 8; i++)
+            if (seen[i] == (const void *)(UINT_PTR)v) break;
+        if (i < found) continue;             /* same object spilled again */
+        if (found < 8) seen[found] = (const void *)(UINT_PTR)v;
+        if (!found && first) *first = (const void *)(UINT_PTR)v;
+        found++;
+        fprintf(f, "  stack-scan: BATTLE_ENV %08x referenced from stack slot %p\n",
+                v, (const void *)p);
+    }
+    return found;
+}
+
 /* aai_attach_probe([tag]) -> nothing. Writes data/aai_attach_probe.txt. */
 __declspec(dllexport) int aai_attach_probe(void *L) {
     static unsigned char scanbuf[64 * 1024];   /* one-shot probe: not reentrant */
@@ -389,7 +448,8 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
     unsigned long long scanned = 0;
     unsigned hits = 0, confirmed = 0;
     int truncated = 0, single_ok;
-    const void *B = NULL;
+    const void *B = NULL, *B_stack = NULL;
+    unsigned n_stack = 0;
     char pathbuf[512];
 
     (void)L;                       /* no Lua stack contact: nothing pushed */
@@ -423,6 +483,11 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
         const void *c = (const char *)base + (VA_EMPIRELUAENV_LIST - IMAGE_BASE);
         dump_words(f, "envlist", c, 6);
     }
+
+    /* Preferred anchor first: our own thread stack (see stack_scan). */
+    n_stack = stack_scan(vt_battle, this_tid, &B_stack, f);
+    fprintf(f, "  stack-scan: %u distinct BATTLE_ENV%s referenced from our frames\n",
+            n_stack, n_stack == 1 ? "" : "s");
 
     /* Locate BATTLE by identity. Reads go through RPM into scanbuf, so a page
      * decommitted by another thread mid-scan yields a skipped chunk, never a
@@ -483,6 +548,12 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
             (unsigned long long)(scanned / (1024u * 1024u)), hits, confirmed,
             truncated ? "  [TRUNCATED]" : "");
 
+    /* Prefer the stack anchor; note any disagreement loudly. */
+    if (n_stack == 1 && B && B_stack != B)
+        fprintf(f, "  *** DISAGREEMENT: stack says %p, heap scan first-match %p.\n"
+                   "      The installer MUST refuse in this state.\n", B_stack, B);
+    if (n_stack == 1) B = B_stack;
+
     if (!B) {
         fprintf(f, truncated
                 ? "  NO BATTLE_ENV FOUND but the scan was TRUNCATED -- INCONCLUSIVE\n"
@@ -491,9 +562,8 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
         fclose(f); return 0;
     }
     if (confirmed > 1)
-        fprintf(f, "  WARNING: %u objects matched -- a stale BATTLE_ENV from an\n"
-                   "    earlier battle can survive with the same ctor thread id.\n"
-                   "    Fields below are from the FIRST match only; treat with care.\n",
+        fprintf(f, "  NOTE: %u heap candidates (a stale BATTLE_ENV keeps the same\n"
+                   "    vtable AND ctor thread id). The stack anchor disambiguates.\n",
                 confirmed);
 
     /* THE MEASUREMENT. Only fields the ctor has already written are meaningful
@@ -517,8 +587,9 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
             fprintf(f, "     -> NON-EMPTY \"%s\"  => the engine will attach this.\n",
                     pathbuf);
         if (rd_u8((const char *)B + OFF_B_GUARD, &guard))
-            fprintf(f, "  B+0x64340 guard byte  : %u  (writer still unidentified --\n"
-                       "     open question (b); a non-zero here is inconclusive)\n", guard);
+            fprintf(f, "  B+0x64340 guard byte  : %u  (the REPLAY-PLAYBACK flag: the\n"
+                       "     engine skips attach during a deterministic re-sim, so must we)\n",
+                    guard);
         else
             fprintf(f, "  B+0x64340 guard byte  : <unreadable>\n");
         rd_u32((const char *)B + OFF_B_IFACE, &iface);
@@ -543,6 +614,39 @@ __declspec(dllexport) int aai_attach_probe(void *L) {
                 fprintf(f, "  TIMING: B+0x64408 = %08x, not yet an EmpireLuaEnv\n"
                            "     => confirms we are pre-line-205, as the model predicts.\n", h);
         }
+        /* ---- PRECONDITION CHECKLIST -------------------------------------
+         * Exactly what Route A's installer will evaluate before its single
+         * write, decided here with ZERO writes. If this prints PROCEED, the
+         * only untested line in the real installer is the copy-ctor call. */
+        {
+            unsigned h2 = 0, hv2 = 0, empty_lit = VA_STR_EMPTY_LIT + bias;
+            int p_single = (n_stack == 1) && (confirmed <= 1 || B == B_stack);
+            int p_guard  = (guard == 0);
+            int p_prist  = have && raw[0] == 0 && raw[1] == 0 && raw[2] == empty_lit;
+            int p_timing;
+            rd_u32((const char *)B + OFF_B_BOOTENV, &h2);
+            rd_u32((const void *)(UINT_PTR)h2, &hv2);
+            p_timing = (hv2 != vt_emplua);
+            fprintf(f, "\n  ---- INSTALLER PRECONDITIONS (Route A) ----\n");
+            fprintf(f, "   P1 engine module resolved            : PASS (bias %08x)\n", bias);
+            fprintf(f, "   P2 exactly one BATTLE_ENV, stack-anchored: %s"
+                       " (stack=%u heap=%u)\n", p_single ? "PASS" : "FAIL",
+                    n_stack, confirmed);
+            fprintf(f, "   P3 guard byte == 0 (not replay)      : %s (%u)\n",
+                    p_guard ? "PASS" : "FAIL", guard);
+            fprintf(f, "   P4 script string PRISTINE {0,0,lit}  : %s"
+                       " (want ptr=%08x got %08x)\n", p_prist ? "PASS" : "FAIL",
+                    empty_lit, raw[2]);
+            fprintf(f, "   P5 pre-line-205 (bootenv not yet set): %s\n",
+                    p_timing ? "PASS" : "FAIL");
+            fprintf(f, "   P6 VFS pre-flight (loadfile)         : done in Lua, see\n"
+                       "      the PREFLIGHT line in this file's world header\n");
+            fprintf(f, "   => INSTALLER WOULD: %s\n",
+                    (p_single && p_guard && p_prist && p_timing)
+                    ? "PROCEED (one copy-ctor call to B+0x64128)"
+                    : "REFUSE -- and that refusal is the correct behaviour");
+        }
+
         /* the whole setup-info block: diff scenario vs custom to answer
          * "what else differs besides +0x44" in one shot */
         dump_bytes(f, "B+0x640e4 BATTLE_SETUP_INFO", (const char *)B + OFF_B_SETUPINFO,

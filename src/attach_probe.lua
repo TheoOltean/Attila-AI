@@ -39,14 +39,27 @@ function M.init(core)
 		return;
 	end;
 
+	-- VFS PRE-FLIGHT (installer precondition P6, and NOT optional there).
+	-- The attach loader 0x101b9410 is the only one of its three sibling VFS
+	-- readers that does NOT check stream validity before use, so an
+	-- unresolvable path is a plausible fault on the first tick rather than a
+	-- harmless miss. Resolving it here, in this same VM, moments before, is
+	-- the cheap way to know. Read-only: loadfile compiles, it does not run.
+	local chunk_path = "data/aai/aai_attach.lua";
+	local pre_fn, pre_err = loadfile(chunk_path);
+	local preflight = pre_fn and "PASS (chunk resolves and compiles)"
+		or ("FAIL: " .. tostring(pre_err));
+
 	-- tag the report so battle and frontend blocks are distinguishable (both
 	-- worlds are the same pid). A data/ write only -- the engine is untouched.
 	local mark = io.open("data/aai_attach_probe.txt", "a");
 	if mark then
 		mark:write("\n---- world=" .. tostring(core.world) .. " "
 			.. os.date("%Y-%m-%d %H:%M:%S") .. " ----\n");
+		mark:write("PREFLIGHT " .. chunk_path .. " -> " .. preflight .. "\n");
 		mark:close();
 	end;
+	core.log("ATTACH-PROBE preflight " .. chunk_path .. " -> " .. preflight);
 
 	local ran, err = pcall(fn);
 	if ran then
