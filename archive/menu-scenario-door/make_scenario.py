@@ -16,6 +16,11 @@ Writes (all under pack_src/, committed as mod source):
                                        (pure menu-enumeration test)
                                      AAI_Scenario   -> our cloned XML with
                                        <battle_script> aai_start.lua
+  db/historical_battles_ui_locations_tables/aai_locations
+                                   map pins for both rows. The menu is a
+                                     map: no pin row = battle unreachable
+                                     (live-verified 2026-08-03; the battles
+                                     row alone shows nothing)
   text/db/battles.loc              vanilla file + our name/description
                                      entries (loc files replace whole-file,
                                      so vanilla content must be carried)
@@ -37,6 +42,8 @@ GAME_DATA = (
 )
 
 BATTLES_TABLE = "db\\battles_tables\\battles"
+UI_LOC_TABLE = ("db\\historical_battles_ui_locations_tables"
+                "\\historical_battles_ui_locations")
 BATTLES_LOC = "text\\db\\battles.loc"
 AN_XML = "script\\an_adrianople\\an_battle.xml"
 
@@ -48,6 +55,14 @@ ROWS = [
     ("AAI_Scenario", "napoleon_historic",
      "Script/AAI_Scenario/AAI_Battle.xml",
      "Script/AN_Adrianople/screenshot_small.png"),
+]
+PIN_ROWS = [
+    # (key, x, y, offset) -- key must match the battles-table key. Vanilla
+    # Adrianople sits at (616, 386); ours flank it so they are easy to spot
+    # and clearly not vanilla. Third i32 is 0 on 7 of 10 vanilla rows
+    # (-50/100 on the rest -- label offset?); 0 is the safe copy.
+    ("AAI_Adrianople", 556, 416, 0),
+    ("AAI_Scenario", 676, 416, 0),
 ]
 LOC_ADD = [
     ("battles_localised_name_AAI_Adrianople", "AAI Adrianople (row clone)"),
@@ -132,6 +147,42 @@ def parse_battles(data):
     return ver, rows
 
 
+def parse_ui_locations(data):
+    """Parse the vanilla pin table; returns (version, rows).
+    Row layout (derived 2026-08-03, version 1): key StringU8, i32 x, i32 y,
+    i32 offset. The 10 rows are exactly the 10 battles visible on the
+    menu map -- presence here IS menu visibility."""
+    pos = 0
+    if data[pos:pos + 4] == b"\xFD\xFE\xFC\xFF":  # GUID block
+        pos += 4
+        ln = struct.unpack_from("<H", data, pos)[0]
+        pos += 2 + ln * 2
+    if data[pos:pos + 4] != b"\xFC\xFD\xFE\xFF":
+        raise SystemExit("ui_locations table: no version marker")
+    ver = struct.unpack_from("<I", data, pos + 4)[0]
+    pos += 8
+    pos += 1  # constant 0x01 byte before the row count
+    count = struct.unpack_from("<I", data, pos)[0]
+    pos += 4
+    rows = []
+    for _ in range(count):
+        key, pos = read_s8(data, pos)
+        x, y, off = struct.unpack_from("<iii", data, pos)
+        pos += 12
+        rows.append((key, x, y, off))
+    if pos != len(data):
+        raise SystemExit(
+            f"ui_locations table did not parse cleanly ({pos}/{len(data)})")
+    return ver, rows
+
+
+def build_ui_locations_fragment(version):
+    body = b"".join(s8(key) + struct.pack("<iii", x, y, off)
+                    for key, x, y, off in PIN_ROWS)
+    return (b"\xFC\xFD\xFE\xFF" + struct.pack("<I", version)
+            + b"\x01" + struct.pack("<I", len(PIN_ROWS)) + body)
+
+
 def build_battles_fragment(version, template_tail):
     body = b""
     for key, btype, spec, shot in ROWS:
@@ -196,9 +247,17 @@ def main():
     print(f"vanilla battles table: version {ver}, {len(rows)} rows; "
           f"Adrianople tail {an[5].hex()}")
 
+    pin_ver, pin_rows = parse_ui_locations(pack_extract(data_pack, UI_LOC_TABLE))
+    an_pin = next(r for r in pin_rows if r[0] == "Adrianople")
+    print(f"vanilla pin table: version {pin_ver}, {len(pin_rows)} rows; "
+          f"Adrianople pin {an_pin[1:]}")
+
     print("writing:")
     write(os.path.join("db", "battles_tables", "aai_battles"),
           build_battles_fragment(ver, an[5]))
+    write(os.path.join("db", "historical_battles_ui_locations_tables",
+                       "aai_locations"),
+          build_ui_locations_fragment(pin_ver))
     write(os.path.join("text", "db", "battles.loc"),
           amend_loc(pack_extract(local_pack, BATTLES_LOC)))
     write(os.path.join("script", "aai_scenario", "aai_battle.xml"),

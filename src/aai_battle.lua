@@ -16,6 +16,8 @@ core.load_modules({
 	-- injected only into attached script states, e.g. battle_entry.lua).
 	"menu_probe",  -- VM census + native-door test in menu battles.
 	--   DEFAULT-OFF: self-gates on data/aai_menu_probe.txt.
+	"reg_walk",  -- Door B rung 1: registry hunt for the attach machinery.
+	--   DEFAULT-OFF: self-gates on data/aai_reg_walk.txt.
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the
