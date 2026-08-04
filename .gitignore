@@ -10,3 +10,6 @@ mem/aai_scan_state.pkl
 *.pack
 __pycache__/
 *.pyc
+
+# crash artifacts from shell invocations
+*.stackdump
