@@ -45,6 +45,20 @@ def main():
         out = subprocess.check_output([OBJDUMP, "-p", OUT], text=True, env=ENV)
         deps = [l.split()[-1] for l in out.splitlines() if "DLL Name" in l]
         print("runtime DLL deps:", ", ".join(deps) or "(none)")
+        # Print the export table too: a stale install is otherwise invisible
+        # until a Lua module quietly fails to resolve its symbol.
+        exports, seen = [], False
+        for line in out.splitlines():
+            if "Ordinal/Name Pointer" in line:
+                seen = True
+                continue
+            if seen:
+                parts = line.split()
+                if len(parts) == 2 and parts[0].startswith("["):
+                    exports.append(parts[1])
+                elif line.strip() == "" and exports:
+                    break
+        print("exports:", ", ".join(exports) or "(none parsed)")
     except Exception as e:
         print("objdump skipped:", e)
     dest = os.path.join(GAME_DATA, "aai_native.dll")
