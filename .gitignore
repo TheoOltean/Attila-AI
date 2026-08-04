@@ -1,8 +1,9 @@
 cluade-codex/
 
-# local docs/notes/findings stay out of git — code only
-*.md
-reference/
+# docs (*.md) are tracked; reference/ data extracts stay local (regenerable)
+reference/**
+!reference/**/
+!reference/**/*.md
 
 # scan state / build artifacts
 mem/aai_scan_state.pkl

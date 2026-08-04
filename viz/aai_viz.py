@@ -126,7 +126,11 @@ TEST_ACK_FILE = os.path.join(DATA, "aai_test_ack.json")
 CMDS_FILE = os.path.join(DATA, "aai_cmds.json")
 ABILSTATS_FILE = os.path.join(DATA, "aai_ability_stats.json")
 BLD_FILE = os.path.join(DATA, "aai_bld.json")
+AEQ_FILE = os.path.join(DATA, "aai_aeq.json")
 CAPEV_FILE = os.path.join(DATA, "aai_capev.json")
+ARMIES_FILE = os.path.join(DATA, "aai_armies.json")
+CAMP_ACK_FILE = os.path.join(DATA, "aai_camp_ack.json")
+CAMP_ORDER_FILE = os.path.join(DATA, "aai_camp_order.txt")
 
 
 def load_notes():
@@ -156,7 +160,7 @@ HARNESS_VERBS = frozenset((
 # harness.lua's GLOBALS table: battlefield probes, no unit key (some no-arg)
 # (battle-level write levers all removed 2026-07-29 — "Dont need")
 HARNESS_GLOBALS = frozenset((
-    "freeze", "elev", "bld", "bldstep", "bdestroyi", "aeq", "vp", "ships"))
+    "freeze", "elev", "bld", "bldstep", "aeq", "vp"))
 
 _TIER_RE = re.compile(r"^T(\d)\s*(.*)$", re.S)
 
@@ -370,6 +374,62 @@ def send_test_order(req):
         _order_q.append((_test_seq, line))
         _dispatch_locked()
         return _test_seq, len(_order_q)
+
+
+# ---- campaign mailbox (spawner.lua) -----------------------------------
+# Append-only, id-deduped by the module; ids must stay unique for the whole
+# campaign session even across viz restarts, so the counter reseeds from the
+# max id visible in the order file AND the ack ring (whichever survives).
+# Small monotonic ints only -- the 32-bit LUA_NUMBER law.
+_camp_seq = None
+_camp_lock = threading.Lock()
+_UNIT_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,80}$")
+
+
+def _camp_seed():
+    top = 0
+    try:
+        with open(CAMP_ORDER_FILE, encoding="utf-8") as f:
+            for ln in f:
+                parts = ln.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    top = max(top, int(parts[1]))
+    except OSError:
+        pass
+    try:
+        with open(CAMP_ACK_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        top = max(top, int(data.get("last") or 0))
+    except (OSError, ValueError, TypeError):
+        pass
+    return top
+
+
+def send_camp_orders(req):
+    """Validate + append campaign-mailbox lines: scan | grant <cqi> <unit_key>."""
+    global _camp_seq
+    lines = req.get("lines")
+    if not isinstance(lines, list) or not 1 <= len(lines) <= 200:
+        raise ValueError("need 1..200 campaign order lines")
+    with _camp_lock:
+        if _camp_seq is None:
+            _camp_seq = _camp_seed()
+        out, ids = [], []
+        for ln in lines:
+            parts = str(ln).split()
+            if parts[:1] == ["scan"] and len(parts) == 1:
+                _camp_seq += 1
+                out.append("scan %d" % _camp_seq)
+            elif parts[:1] == ["grant"] and len(parts) == 3 \
+                    and parts[1].isdigit() and _UNIT_KEY_RE.match(parts[2]):
+                _camp_seq += 1
+                out.append("grant %d %s %s" % (_camp_seq, parts[1], parts[2]))
+            else:
+                raise ValueError("bad campaign order line: %r" % ln)
+            ids.append(_camp_seq)
+        with open(CAMP_ORDER_FILE, "a", encoding="utf-8") as f:
+            f.write("".join(l + "\n" for l in out))
+        return ids
 
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -672,12 +732,19 @@ function poll(){
     else if(allUnits(inc).length>0 || !state || allUnits(state).length===0 || inc.phase==="complete"){
       state=inc;                    // accept real frames, first frame, or battle-end
     }                               // else: transient empty frame -> keep last good state
+    if(inc&&inc.battle_id&&geom&&geom.battle_id!==inc.battle_id)
+      geom=null;                    // stale-layer bug 08-01: geometry file on
+                                    // disk outlives its battle - drop layers
+                                    // that aren't from THIS battle (unstamped
+                                    // legacy files count as stale too)
     if(!geom && inc) loadGeom();   // written once per battle; retry until it lands
   }).catch(function(){});
 }
 function loadGeom(){
   fetch("/geometry",{cache:"no-store"}).then(function(r){return r.json();})
-    .then(function(d){ if(d&&d.buildings&&d.buildings.length) geom=d; }).catch(function(){});
+    .then(function(d){ if(!d||!d.buildings||!d.buildings.length) return;
+      if(state&&state.battle_id&&d.battle_id!==state.battle_id) return;
+      geom=d; }).catch(function(){});
 }
 function loadStats(){
   fetch("/unitstats",{cache:"no-store"}).then(function(r){return r.json();})
@@ -852,7 +919,7 @@ PAGE_HARNESS = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 var caps=null, state=null, feedAge=null, stats={};
 var active=null;                 // {si,bi}: active section/subsection
 var selUid=null, targetKey=null; // inspector selection / AI command target
-var clickPts=[];                 // last two world-coord map clicks (write mode)
+var clickPts=[];                 // ONE stored ground click (ELEV / OCCUPY pt)
 var orders=[];                   // fired test orders, newest first (UI shows [0] only)
 var hoverU=null, mouse={x:0,y:0};
 var mapKind="none", mapFit=null, ulistSig=null, tselSig=null;
@@ -977,6 +1044,7 @@ function selUnit(){
 // ---- segment kinds ----
 function segKind(secT,subT){
   var s=secT.toLowerCase(), b=(subT||"").toLowerCase();
+  if(s.indexOf("campaign")===0) return "c_spawn";
   if(s.indexOf("write")===0){
     if(b.indexOf("movement")===0) return "w_move";
     if(b.indexOf("attacking")===0) return "w_atk";
@@ -1091,6 +1159,10 @@ function widgetHtml(kind){
       '<div class="dtl" id="dtl"></div></div>'+
       '<div class="ctrl" id="ctrl">'+controlsHtml(kind)+'</div>'+
       '<div id="olog"></div>';
+  if(kind==="c_spawn")
+    return '<div class="wgt"><div class="dtl" id="dtl" style="flex:1;max-width:none"></div></div>'+
+      '<div class="ctrl" id="ctrl">'+controlsHtml(kind)+'</div>'+
+      '<div id="olog"></div>';
   if(kind==="r_card")
     return '<div class="wgt"><div class="mapcol"><canvas id="map"></canvas>'+
       '<div class="hint" id="mapmsg">hover any unit (map or list) for its full DB card</div></div>'+
@@ -1110,6 +1182,20 @@ function widgetHtml(kind){
 function opt(list){return list.map(function(x){
   return '<option value="'+esc(x)+'">'+esc(x)+'</option>';}).join("");}
 function controlsHtml(kind){
+  if(kind==="c_spawn")
+    return '<div class="cg"><b>armies</b><button data-a="cscan">REFRESH ARMIES</button> '+
+      '<span class="hint">walks every faction\'s forces into the list (auto-runs at '+
+      'campaign load and after each grant). CAMPAIGN MAP ONLY - during a battle the '+
+      'campaign world sleeps and orders wait in the mailbox until you\'re back</span></div>'+
+      '<div class="cg"><b>units to add</b>'+
+      '<input id="ckey" list="ukeys" size="36" placeholder="unit key (type to search)">'+
+      '<datalist id="ukeys"></datalist>'+
+      '<button data-a="cadd">ADD</button><button data-a="cclear">CLEAR</button>'+
+      '<span id="cpending" class="hint"></span></div>'+
+      '<div class="cg"><b>grant</b><button data-a="cgrant">GRANT TO CHECKED ARMIES</button> '+
+      '<span class="hint">every listed unit goes into every checked army (yours or '+
+      'enemy). The PROOF is the roster - each army row re-reads its unit list right '+
+      'after (an OK ack alone proves nothing)</span></div>';
   if(kind==="w_move")
     return '<div class="cg"><b>gestures (game-style, work on every panel)</b> '+
       '<span class="hint">right-click = move · right-drag = draw the line, '+
@@ -1121,18 +1207,15 @@ function controlsHtml(kind){
       '<button data-a="rotm">ROT -45</button><button data-a="rotp">ROT +45</button>'+
       '<button data-a="stepf">STEP F</button><button data-a="stepb">STEP B</button></div>';
   if(kind==="w_atk")
-    return '<div class="cg"><b>gestures</b> <span class="hint">right-click an enemy '+
-      'unit = attack it · alt+right-click = attack ground</span></div>'+
+    return '<div class="cg"><b>gestures</b> <span class="hint">LEFT-click an enemy '+
+      'unit = attack it (or right-click it) · artillery right-clicked on ground '+
+      'FIRES at it · red dashed line = the standing attack order</span></div>'+
       '<div class="cg"><b>ranged</b>'+
       '<button data-a="faw1">FAW ON</button><button data-a="faw0">FAW OFF</button> '+
-      'shot <input id="shot" size="12" placeholder="shot type"><button data-a="shot">SET</button></div>'+
+      'shot <select id="shot"></select><button data-a="shot">SET</button> '+
+      '<span class="hint" id="shothint"></span></div>'+
       '<div class="cg"><b>melee</b>'+
       '<button data-a="mlee1">MELEE ON</button><button data-a="mlee0">MELEE OFF</button></div>';
-  if(kind==="r_flow")
-    return '<div class="cg"><b>naval probe</b><button data-a="ships">SHIPS PROBE</button> '+
-      '<span class="hint">walks every army, acks per-army ship + reinf-ship counts '+
-      '(a:m=s#/r#) - fire this when an army visibly has ships but the rows above '+
-      'show none</span></div>';
   if(kind==="r_terrain")
     return '<div class="cg"><b>elevation point sample</b>'+
       '<button data-a="elev">ELEV SAMPLE (last click)</button> '+
@@ -1141,20 +1224,22 @@ function controlsHtml(kind){
       '(position panel) is the same read under each unit</span></div>';
   if(kind==="r_bld")
     return '<div class="cg"><b>buildings</b>'+
+      '<button data-a="bldall">SCAN ALL</button> '+
       '<button data-a="bldprobe">SCAN NEXT</button> '+
       'chunk <input id="bchunk" value="250" size="5"> '+
-      'mode <select id="bmode"><option value="names" selected>names only '+
-      '(cold-safe test)</option><option value="lite">lite (name+pos)</option>'+
+      'mode <select id="bmode"><option value="v1" selected>v1 replica (the '+
+      'build that survived fresh battles)</option><option value="names">names '+
+      'only</option><option value="lite">lite (name+pos)</option>'+
       '<option value="full">full (all fields)</option></select> '+
-      '<span class="hint"><span style="color:var(--amber)">VERDICT 07-31: no '+
-      'safe Lua scan exists.</span> The names-only walk (zero object calls) '+
-      'still killed the feed at the first cold entry, and a cold entry&#39;s '+
-      'metatable measured IDENTICAL to warm (10 keys) - cold slots are '+
-      'undetectable and any touch is lethal, while warmth comes and goes with '+
-      'engine streaming. Buildings move to the native/static route (offline '+
-      'map geometry + native map-id). These scan buttons remain for deliberate '+
-      'experiments in throwaway battles only - every click gambles the '+
-      'feed</span></div>'+
+      '<span class="hint"><span style="color:#3fb950">SOLVED 08-01:</span> '+
+      'SCAN ALL walks the WHOLE registry in one shot with the proven v1 blind '+
+      'mechanics (name, position, health, owner, garrison, fire, destroyed '+
+      'per entry - verified on a full 10,007-entry registry, ~60k calls, feed '+
+      'alive); SCAN NEXT does it chunk by chunk for careful runs, and the '+
+      'guarded modes (names/lite/full) remain as diagnostics. Caveat that '+
+      'stays real: a COLD registry (the 07-31 settlement save) can still kill '+
+      'the feed on first touch - if a scan freezes it, quit and retry later; '+
+      'treat the FIRST scan on an unfamiliar map as throwaway</span></div>'+
       '<div class="cg"><b>freeze bisect</b>'+
       '<button data-a="bldbisect">BISECT NEXT STEP</button> '+
       'jump to step <input id="bstep" size="3"> '+
@@ -1168,9 +1253,14 @@ function controlsHtml(kind){
       'Warm control run passed 07-31; the decisive run is at conflict START '+
       '(cold registry). '+
       '<span style="color:var(--amber)">Throwaway battles only</span></span></div>'+
-      '<div class="cg"><b>assault equipment</b><button data-a="aeq">AEQ PROBE</button> '+
-      '<span class="hint">count acks; items cache for the siege console verbs '+
-      '(0 outside sieges)</span></div>';
+      '<div class="cg"><b>siege engines</b><button data-a="aeq">SIEGE ENGINES</button> '+
+      '<span class="hint">enumerates the assault vehicles (rams/towers) onto '+
+      'the map as diamonds + the panel list. MEASURED 08-01 (method dump, '+
+      'Theo-verified): the vehicle surface exposes position ONLY - no '+
+      'name/owner/hp/crew getter exists, so diamonds render amber and crew '+
+      'state reads unreadable; owner/claimed would be a native (T3) read. '+
+      'Click again to refresh positions. 0 on battles without assault '+
+      'equipment; items also cache for the OCCUPY/INTERACT verbs</span></div>';
   if(kind==="r_vp")
     return '<div class="cg"><b>victory points</b>'+
       '<button data-a="vp">VP GETTER PROBE</button> '+
@@ -1178,17 +1268,20 @@ function controlsHtml(kind){
       'getters live and acks what each returned; the capture-events readout above '+
       'updates on capture start/finish in a fort/siege</span></div>';
   if(kind==="w_siege")
-    return '<div class="cg"><b>by building index</b> '+
-      '<span class="hint">run BLD PROBE (READ &gt; Buildings) first to fill the cache; '+
-      'idx = its row index</span><br>idx <input id="sbi" value="1" size="4"> '+
+    return '<div class="cg"><b>by scanned building</b> '+
+      'idx <input id="sbi" value="1" size="6" list="sbilist">'+
+      '<datalist id="sbilist"></datalist> '+
       '<button data-a="battk">ATTACK BLDG</button>'+
       '<button data-a="climb">CLIMB</button>'+
       '<button data-a="defendbld">DEFEND</button>'+
-      '<button data-a="leavebld">LEAVE BLDG</button></div>'+
-      '<div class="cg"><b>deployables (by aeq index)</b> idx <input id="sdi" value="1" '+
-      'size="4"> <button data-a="usedep">OCCUPY VEHICLE</button>'+
+      '<button data-a="leavebld">LEAVE BLDG</button> '+
+      '<span class="hint" id="sbihint">run a buildings SCAN (READ &gt; Buildings) '+
+      'to fill the type-ahead with real scanned rows (#idx = name); or left-click '+
+      'a scanned square on the map to attack it directly</span></div>'+
+      '<div class="cg"><b>deployables (probed siege engines)</b> '+
+      '<select id="sdi"></select> <button data-a="usedep">OCCUPY VEHICLE</button>'+
       '<button data-a="usedep2">INTERACT</button> '+
-      '<span class="hint">run AEQ PROBE first (READ &gt; Buildings)</span></div>';
+      '<span class="hint" id="sdihint"></span></div>';
   if(kind==="w_stance")
     return '<div class="cg"><span class="hint">the layers, disambiguated: '+
       '<b>modes</b> = behaviour toggles (fire-at-will, loose, skirmish, defend...) '+
@@ -1203,7 +1296,8 @@ function controlsHtml(kind){
       '<div class="cg"><b>width</b>'+
       '<button data-a="winc">WIDTH +</button><button data-a="wdec">WIDTH -</button></div>'+
       '<div class="cg"><b>set formation (form_* tier)</b>'+
-      '<input id="abil" size="18" placeholder="form_..."><button data-a="abil">FIRE</button>'+
+      '<select id="abil"></select><button data-a="abil">FIRE</button> '+
+      '<span class="hint" id="abilhint"></span>'+
       '<div id="abquick" style="margin-top:4px"></div></div>';
   if(kind==="w_meta")
     return '<div class="cg"><b>control ownership</b>'+
@@ -1241,8 +1335,10 @@ function wireWidget(){
       }
       hoverU=hitUnit(sx,sy);
       if(hoverU) showTip(hoverU);      // stats pop on CLICK now, never on hover
-      else{ var hb=hitBld(sx,sy);      // buildings label on hover
-        if(hb) showBldTip(hb); else showTip(null); }
+      else{ var hv=hitAeq(sx,sy);      // siege engines, then buildings
+        if(hv) showAeqTip(hv);
+        else{ var hb=hitBld(sx,sy);
+          if(hb) showBldTip(hb); else showTip(null); } }
     };
     cvm.onmouseleave=function(){ hoverU=null; showTip(null); };
     cvm.onmouseup=function(e){
@@ -1251,18 +1347,39 @@ function wireWidget(){
       var o=hitUnit(sx,sy);
       if(d.btn===0){
         if(d.moved) return;                        // was a pan
-        if(o){                                     // unit: select (+target if AI)
-          selUid=o.uid; if(o.key) setTarget(o.key);
+        if(o&&o.key){                              // commandable unit: select
+          selUid=o.uid; setTarget(o.key);
           if(mapKind==="r_card") showCard(o.u);    // click opens the stat sheet
           updateTop(); renderDetail(); return;
         }
-        if(mapFit){                                // ground: store pt (A/B verbs)
-          var w=s2w(mapFit,sx,sy);
-          clickPts.push([w[0],w[1]]);
-          if(clickPts.length>2) clickPts.shift();
+        if(o&&targetKey&&mapKind.charAt(0)==="w"&&o.u.pos){
+          // enemy unit + armed target on a write page = ATTACK IT
+          fire("aunit "+targetKey+" "+fx(o.u.pos.x)+" "+fx(o.u.pos.z));
+          atkLines[targetKey]={uid:o.uid,name:o.u.name||"unit"};
+          toast("unit "+targetKey+" ordered to attack "+(o.u.name||"enemy unit"));
+          return;
+        }
+        if(o){                                     // read pages: inspect only
+          selUid=o.uid;
+          if(mapKind==="r_card") showCard(o.u);
+          updateTop(); renderDetail(); return;
+        }
+        var hb2=hitBld(sx,sy);                     // building + armed target =
+        if(hb2&&targetKey){                        // ordered building attack
+          fire("battk "+targetKey+" "+hb2.i);
+          atkLines[targetKey]={i:hb2.i,x:hb2.x,z:hb2.z,
+            name:hb2.name||"building"};
+          toast("unit "+targetKey+" ordered onto "+
+            (hb2.name||("building #"+hb2.i)));
+          return;
+        }
+        if(mapFit){                                // ground: remember ONE point
+          var w=s2w(mapFit,sx,sy);                 // (ELEV SAMPLE / OCCUPY)
+          clickPts=[[w[0],w[1]]];
           updMapMsg();
         }
       } else if(d.btn===2){
+        if(targetKey) delete atkLines[targetKey];  // new order supersedes
         gestureOrder(d,sx,sy,o);
       }
     };
@@ -1284,27 +1401,61 @@ function wireWidget(){
     var b=e.target.closest("button");
     if(b&&b.dataset.a) conAct(b.dataset.a);
   };
+  if(mapKind==="c_spawn"){                 // campaign tab: unit-key picker
+    var dl=document.getElementById("ukeys");
+    if(dl){
+      var uks=Object.keys(stats||{}).sort();
+      dl.innerHTML=uks.map(function(k){return '<option value="'+esc(k)+'">';}).join("");
+    }
+    var ci2=document.getElementById("ckey");
+    if(ci2) ci2.onkeydown=function(e){ if(e.key==="Enter") conAct("cadd"); };
+    renderCPend();
+  }
   var ts=document.getElementById("tsel");
   if(ts){ renderTsel(); ts.onchange=function(){ setTarget(this.value||null); }; }
   renderAbilQuick(); renderOrders(); renderDetail(); renderUlist();
+  renderShotSel(); renderSiegeSel(true);
 }
 function updMapMsg(){
   var el=document.getElementById("mapmsg");
   if(!el||(mapKind.charAt(0)!=="w"&&mapKind!=="r_terrain")) return;
-  var t="left-click AI = target \u00b7 right-click = move \u00b7 "+
+  var t="left-click AI = select \u00b7 left-click ENEMY = attack \u00b7 "+
+    "left-click scanned building = attack it (red line = the standing order) \u00b7 "+
+    "right-click ground = move (ARTILLERY: fires at it, alt+right = move) \u00b7 "+
     "right-drag = draw the line (ghost shows placement) \u00b7 "+
-    "right-click enemy = attack \u00b7 alt+right = atk ground \u00b7 "+
     "drag pan \u00b7 wheel zoom \u00b7 R run \u00b7 H halt";
-  if(clickPts.length)
-    t="pts: "+clickPts.map(function(p,i){
-      return (clickPts.length>1?(i?"B ":"A "):"")+fx(p[0])+","+fx(p[1]);}).join("  ")+
-      " \u00b7 left-click ground = add/replace";
+  if(mapKind==="r_terrain")
+    t=clickPts.length?
+      ("sample pt "+fx(clickPts[0][0])+","+fx(clickPts[0][1])+
+       " \u00b7 ELEV SAMPLE reads it \u00b7 click again to move it"):
+      "click the map to set the sample point, then ELEV SAMPLE";
   el.textContent=t;
 }
 function setTarget(k){
   targetKey=k||null;
   if(k) selUid="k:"+k;
-  updateTop(); renderTsel(); renderDetail(); renderAbilQuick();
+  updateTop(); renderTsel(); renderDetail(); renderAbilQuick(); renderShotSel();
+}
+// the shot dropdown offers the TARGETED unit's own DB projectile keys
+// (default first) -- the 07-29 fail was card labels, the wrong namespace
+function renderShotSel(){
+  var sel=document.getElementById("shot"); if(!sel) return;
+  var hintEl=document.getElementById("shothint");
+  var tu=targetUnit();
+  var st=(tu&&stats[tu.u.type]&&stats[tu.u.type].shot_types)||null;
+  if(!st||!st.length){
+    sel.innerHTML=""; sel.disabled=true;
+    if(hintEl) hintEl.textContent=tu?
+      "no missile weapon on this unit":"target a unit first";
+    return;
+  }
+  sel.disabled=false;
+  sel.innerHTML=st.map(function(k,i){   // readable label, real key as value
+    var lab=String(k).replace(/^att_/,"").replace(/_/g," ");
+    return '<option value="'+esc(k)+'">'+esc(lab)+(i?'':' (default)')+'</option>';
+  }).join("");
+  if(hintEl) hintEl.textContent=
+    "this unit's own DB shots; flaming is the visible tell";
 }
 
 // ---- map ----
@@ -1399,11 +1550,19 @@ function gestureOrder(d,sx,sy,o){
       fire("form "+targetKey+" "+fx(pl.mid[0])+" "+fx(pl.mid[1])+" "+
         Math.round(pl.bearing)+" "+fx(front)+" "+(runMode?1:0)); return; }
   }
-  clickPts.push([w[0],w[1]]); if(clickPts.length>2) clickPts.shift(); updMapMsg();
-  if(o&&o.side==="player"&&o.u.pos){
-    fire("aunit "+targetKey+" "+fx(o.u.pos.x)+" "+fx(o.u.pos.z)); return;
+  if(o&&o.side==="player"&&o.u.pos){               // enemy under the click
+    fire("aunit "+targetKey+" "+fx(o.u.pos.x)+" "+fx(o.u.pos.z));
+    atkLines[targetKey]={uid:o.uid,name:o.u.name||"unit"};
+    return;
   }
-  if(d.alt){ fire("apos "+targetKey+" "+fx(w[0])+" "+fx(w[1])+" "+(runMode?1:0)); return; }
+  // ground: artillery FIRES at the point by default (alt = move instead);
+  // everyone else moves (alt = attack ground)
+  var fireGround=(u&&u.arty)?!d.alt:d.alt;
+  if(fireGround){
+    fire("apos "+targetKey+" "+fx(w[0])+" "+fx(w[1])+" "+(runMode?1:0));
+    atkLines[targetKey]={x:w[0],z:w[1],name:"ground"};
+    return;
+  }
   if(u&&u.pos){                    // plain move: ghost faces the travel direction
     var mx=w[0]-u.pos.x, mz=w[1]-u.pos.z, ml=Math.hypot(mx,mz)||1;
     lastGhost={t:Date.now(),mid:[w[0],w[1]],facing:[mx/ml,mz/ml],
@@ -1420,7 +1579,8 @@ window.addEventListener("keydown",function(e){
   if(e.key==="r"||e.key==="R"){ runMode=!runMode; syncRun(); }
   else if(e.key==="Escape"){ targetKey=null; selUid=null;
     updateTop(); renderTsel(); renderDetail(); }
-  else if((e.key==="h"||e.key==="H")&&targetKey){ fire("halt "+targetKey); }
+  else if((e.key==="h"||e.key==="H")&&targetKey){
+    delete atkLines[targetKey]; fire("halt "+targetKey); }
 });
 function hitUnit(sx,sy){
   if(!mapFit) return null;
@@ -1466,6 +1626,44 @@ function drawMap(){
         });
       });
     g.globalAlpha=1;
+  }
+  if(aeqData&&aeqData.rows&&aeqData.rows.length){  // siege engines layer:
+    var vr=Math.max(4,2.2*S);                      // diamonds, owner-colored,
+    aeqData.rows.forEach(function(vd){             // green ring = claimed
+      if(vd.x==null||vd.z==null) return;           // (crewed by a unit)
+      var c=w2s(mapFit,vd.x,vd.z), sd=bldSide(vd);
+      g.fillStyle=(sd==="player")?"#2b4a9f":(sd==="ai")?"#8b2635":"#e8b33e";
+      g.globalAlpha=.95;
+      g.beginPath();
+      g.moveTo(c[0],c[1]-vr); g.lineTo(c[0]+vr,c[1]);
+      g.lineTo(c[0],c[1]+vr); g.lineTo(c[0]-vr,c[1]);
+      g.closePath(); g.fill();
+      g.strokeStyle=vd.claimed?"#3fb950":"rgba(255,255,255,.7)";
+      g.lineWidth=vd.claimed?2.5:1;
+      g.stroke();
+      g.globalAlpha=1;
+    });
+  }
+  var atkKeys=Object.keys(atkLines);            // standing attack orders:
+  if(atkKeys.length){                           // red dashed attacker->target
+    g.strokeStyle="#ff5b5b"; g.lineWidth=1.5; g.setLineDash([6,4]);
+    atkKeys.forEach(function(k){
+      var al=atkLines[k], uo=null, to=null;
+      us.forEach(function(o2){
+        if(o2.key===k) uo=o2;
+        if(al.uid&&o2.uid===al.uid) to=o2;
+      });
+      if(!uo||!uo.u.pos){ delete atkLines[k]; return; }
+      if(al.uid){                               // unit target: follow it live;
+        if(!to||!to.u.pos){ delete atkLines[k]; return; }  // gone = order over
+        al.x=to.u.pos.x; al.z=to.u.pos.z;
+      }
+      var a=w2s(mapFit,uo.u.pos.x,uo.u.pos.z), b2=w2s(mapFit,al.x,al.z);
+      g.beginPath(); g.moveTo(a[0],a[1]); g.lineTo(b2[0],b2[1]); g.stroke();
+      g.fillStyle="#ff5b5b";
+      g.beginPath(); g.arc(b2[0],b2[1],3.5,0,6.283); g.fill();
+    });
+    g.setLineDash([]);
   }
   us.forEach(function(o){                       // game-style footprint rects
     var u=o.u, p=u.pos; if(!p) return;
@@ -1555,18 +1753,8 @@ function drawMap(){
     else drawGhostH(g,lastGhost.mid,lastGhost.facing,lastGhost.front,
                     lastGhost.u,1-age/1100);
   }
-  if(mapKind.charAt(0)==="w"||mapKind==="r_terrain"){
-    clickPts.forEach(function(pt,i){
-      cross(g,w2s(mapFit,pt[0],pt[1]),clickPts.length>1?(i?"B":"A"):"");
-    });
-    if(clickPts.length===2){
-      var a=w2s(mapFit,clickPts[0][0],clickPts[0][1]),
-          b=w2s(mapFit,clickPts[1][0],clickPts[1][1]);
-      g.strokeStyle="rgba(217,180,91,.6)"; g.setLineDash([4,3]);
-      g.beginPath(); g.moveTo(a[0],a[1]); g.lineTo(b[0],b[1]); g.stroke();
-      g.setLineDash([]);
-    }
-  }
+  if(mapKind==="r_terrain"&&clickPts.length)      // terrain page only: the one
+    cross(g,w2s(mapFit,clickPts[0][0],clickPts[0][1]),"sample");  // sample pt
   if(hoverU&&hoverU.u.pos){
     var hc=w2s(mapFit,hoverU.u.pos.x,hoverU.u.pos.z);
     g.strokeStyle="rgba(255,255,255,.5)";
@@ -1614,7 +1802,37 @@ function showBldTip(bd){
     (sd===null?' &middot; owner unknown':
       ' &middot; '+(sd==="player"?'allied':'enemy'))+
     (bd.garr?' &middot; GARRISONED':'')+
+    (bd.fire?' &middot; <span style="color:var(--amber)">ON FIRE</span>':'')+
+    (bd.dead?' &middot; DESTROYED':'')+
     (bd.cap!=null?' &middot; cap '+bd.cap:'');
+  el.style.display="block";
+  el.style.left=Math.min(mouse.x+14,window.innerWidth-275)+"px";
+  el.style.top=Math.min(mouse.y+12,window.innerHeight-90)+"px";
+}
+// siege-engine hover: nearest probed vehicle diamond (screen-space)
+function hitAeq(sx,sy){
+  if(!aeqData||!aeqData.rows||!mapFit) return null;
+  var S=mapFit.s*hview.zoom, best=null, bestD=1e9;
+  aeqData.rows.forEach(function(vd){
+    if(vd.x==null||vd.z==null) return;
+    var c=w2s(mapFit,vd.x,vd.z);
+    var d=Math.hypot(c[0]-sx,c[1]-sy), r=Math.max(4,2.2*S)+5;
+    if(d<r&&d<bestD){ best=vd; bestD=d; }
+  });
+  return best;
+}
+function showAeqTip(vd){
+  var el=document.getElementById("tip");
+  if(!vd){el.style.display="none";return;}
+  var sd=bldSide(vd);
+  el.innerHTML='<b style="color:var(--gold)">'+
+    esc(vd.name||"siege engine")+'</b>'+
+    ' <span class="hint">#'+vd.i+'</span><br>'+
+    (vd.claimed===true?'CLAIMED'+(vd.by?' by '+esc(vd.by):''):
+     vd.claimed===false?'unclaimed':'crew state unreadable')+
+    (vd.hp!=null?' &middot; hp '+fx(vd.hp):'')+
+    (sd===null?' &middot; owner unknown':
+      ' &middot; '+(sd==="player"?'allied':'enemy'));
   el.style.display="block";
   el.style.left=Math.min(mouse.x+14,window.innerWidth-275)+"px";
   el.style.top=Math.min(mouse.y+12,window.innerHeight-90)+"px";
@@ -1687,6 +1905,56 @@ function barHtml(label,v,mx,color){
 function renderDetail(){
   var el=document.getElementById("dtl"); if(!el) return;
   if(mapKind!=="r_card") showCard(null);   // the sheet lives on r_card only
+  if(mapKind==="c_spawn"){                 // campaign tab: no battle feed needed
+    var hc='<div class="shdr">campaign armies</div>';
+    if(!campData||!campData.armies)
+      hc+='<div class="hint">no armies feed yet - it lands at campaign load '+
+        '(rebuilt pack + a campaign session), or hit REFRESH ARMIES below</div>';
+    else{
+      var crows=campData.armies.slice();
+      crows.sort(function(a,b){
+        if((a.human?1:0)!==(b.human?1:0)) return (b.human?1:0)-(a.human?1:0);
+        if((a.at_war?1:0)!==(b.at_war?1:0)) return (b.at_war?1:0)-(a.at_war?1:0);
+        return (a.faction||"").localeCompare(b.faction||"")||((a.cqi||0)-(b.cqi||0));
+      });
+      hc+=kv("armies",crows.length)+
+        (campData.turn!=null?kv("turn",campData.turn):"")+
+        '<div class="hint">check the target armies (garrisons without a general '+
+        'can\'t receive units and aren\'t listed)</div>';
+      var lastFac=null;
+      crows.forEach(function(ar){
+        if(ar.faction!==lastFac){
+          lastFac=ar.faction;
+          hc+='<div class="shdr">'+esc(ar.faction||"?")+
+            (ar.human?' <span style="color:var(--gold)">YOUR FACTION</span>':
+             ar.at_war?' <span class="hint">at war</span>':'')+'</div>';
+        }
+        hc+='<div style="margin:2px 0"><label style="cursor:pointer">'+
+          '<input type="checkbox" class="carm" data-cqi="'+ar.cqi+'"'+
+          (campSel[ar.cqi]?" checked":"")+'> <b>cqi '+ar.cqi+'</b>'+
+          (ar.region?' · '+esc(ar.region):'')+
+          ' · '+(ar.n!=null?ar.n:"?")+' units</label>'+
+          ((ar.units&&ar.units.length)?
+            '<div class="hint" style="margin-left:22px">'+
+            esc(rosterLine(ar.units))+'</div>':'')+
+          '</div>';
+      });
+    }
+    if(campAck&&campAck.acks&&campAck.acks.length){
+      hc+='<div class="shdr">recent orders</div>';
+      campAck.acks.slice(-6).reverse().forEach(function(a2){
+        hc+='<div style="margin:2px 0"><code>#'+a2.id+' '+esc(a2.verb||"?")+'</code> '+
+          (a2.ok?'<span style="color:#3fb950">OK</span>':
+                 '<span style="color:#ff5b5b">ERR</span>')+
+          (a2.msg?' <span class="hint">'+esc(a2.msg)+'</span>':'')+'</div>';
+      });
+    }
+    el.innerHTML=hc;
+    el.querySelectorAll(".carm").forEach(function(cb){
+      cb.onchange=function(){ campSel[cb.dataset.cqi]=cb.checked; };
+    });
+    return;
+  }
   if(!state){
     el.innerHTML='<div class="hint">no battle feed \u2014 live reads need a running '+
       'battle; the checklist below still works</div>';
@@ -1711,18 +1979,9 @@ function renderDetail(){
         hf+='<div class="shdr">alliance '+(ai+1)+' &middot; army '+(ri+1)+'</div>'+
           kv("units",ar.n!=null?ar.n:(ar.units||[]).length)+
           kv("commander alive",ar.commander_alive===false?"NO":
-            (ar.commander_alive?"yes":"?"))+
-          kv("reinforcements",(ar.reinf&&ar.reinf.length)?
-            ar.reinf.length+" waiting":"none waiting")+
-          kv("ships",(ar.ships!=null)?ar.ships:"—")+
-          kv("reinf ships",(ar.reinf_ships!=null)?ar.reinf_ships:"—");
+            (ar.commander_alive?"yes":"?"));
       });
     });
-    hf+='<div class="hint" style="margin-top:6px">reinforcements = armies/fleets that '+
-      'arrive mid-battle (adjacent on the campaign map when the battle started); '+
-      '"waiting" counts reserves not yet on the field \u2014 once one marches on, it joins '+
-      'the army rows above. Ships rows: 0 on land, live in naval battles '+
-      '(SHIPS PROBE below re-reads them on demand)</div>';
     el.innerHTML=hf;
     return;
   }
@@ -1766,6 +2025,35 @@ function renderDetail(){
         '<span style="color:#c04a5a">maroon</span> = enemy, '+
         '<span style="color:var(--amber)">amber</span> = unowned; hover a square '+
         'for its name, hp and #idx (what the write verbs take)</div>';
+    }
+    hbld+='<div class="shdr">siege engines</div>';
+    if(!aeqData||aeqData.count==null)
+      hbld+='<div class="hint">not probed yet - hit SIEGE ENGINES below '+
+        '(rams/towers; count is 0 on battles without assault equipment)</div>';
+    else if(!aeqData.rows||!aeqData.rows.length)
+      hbld+=kv("engines",aeqData.count)+
+        '<div class="hint">none in this battle - assault equipment exists '+
+        'only when an attacker brings rams/towers/ladders</div>';
+    else{
+      hbld+=kv("engines",aeqData.count);
+      var anyclaim=false;
+      aeqData.rows.forEach(function(vd){
+        if(vd.claimed!=null) anyclaim=true;
+        hbld+='<div style="margin:2px 0">'+badge("#"+vd.i,vd.claimed===true,
+            vd.claimed===true?("claimed"+(vd.by?" by "+vd.by:"")):
+            vd.claimed===false?"unclaimed":"crew state unreadable")+
+          ' '+esc(vd.name||"engine")+
+          (vd.hp!=null?' <span class="hint">hp '+fx(vd.hp)+'</span>':'')+
+          (vd.x==null?' <span class="hint">(no position read)</span>':'')+
+          '</div>';
+      });
+      hbld+='<div class="hint">diamonds on the map; hover one for detail; '+
+        're-click SIEGE ENGINES to refresh positions.'+
+        (anyclaim?' <span style="color:#3fb950">Green ring</span> = claimed '+
+        '- crewed by a unit.':' Owner + crew state are NOT exposed by the '+
+        'vehicle surface (position is its only getter - measured 08-01), '+
+        'so diamonds render amber; those fields need a native read.')+
+        '</div>';
     }
     el.innerHTML=hbld;
     return;
@@ -2034,26 +2322,54 @@ function renderTsel(){
   }
 }
 function renderAbilQuick(){
-  var el=document.getElementById("abquick"); if(!el) return;
   var o=targetKey?findKey(targetKey):null;
   var s=(o&&o.u.type)?stats[o.u.type]:null;
   var fl=((s&&s.abilities)||[]).filter(function(a){return a.indexOf("form_")===0;});
+  var sel=document.getElementById("abil"), sh=document.getElementById("abilhint");
+  if(sel){                         // dropdown = the SAME verified DB roster;
+    sel.innerHTML=fl.map(function(a){   // game names shown, real keys sent
+      return '<option value="'+esc(a)+'">'+esc(abName(a))+'</option>';}).join("");
+    sel.disabled=!fl.length;
+    if(sh) sh.textContent=fl.length?"the target's own DB formation roster":
+      (o?"no formations on this unit type's roster":"target a unit first");
+  }
+  var el=document.getElementById("abquick"); if(!el) return;
   el.innerHTML=fl.length?
     fl.map(function(a){
-      return '<button data-a="qa:'+esc(a)+'">'+esc(a)+'</button>';}).join(""):
-    '<span class="hint">no form_* roster for target</span>';
+      return '<button data-a="qa:'+esc(a)+'">'+esc(abName(a))+'</button>';}).join(""):
+    '<span class="hint">no formations on this unit type\'s roster</span>';
 }
 
 // ---- order console ----
 function conAct(a){
+  // campaign spawn tab (no unit target, no battle needed)
+  if(a==="cscan") return campSend(["scan"]);
+  if(a==="cadd"){
+    var ci=document.getElementById("ckey"), ck2=ci?ci.value.trim():"";
+    if(!ck2){ toast("type or pick a unit key first"); return; }
+    if(stats&&Object.keys(stats).length&&!stats[ck2])
+      toast("note: '"+ck2+"' is not in the DB extract - the engine will judge it");
+    campPend.push(ck2); if(ci) ci.value=""; renderCPend(); return;
+  }
+  if(a==="cclear"){ campPend=[]; renderCPend(); return; }
+  if(a==="cgrant"){
+    var cq=Object.keys(campSel).filter(function(c){return campSel[c];});
+    if(!cq.length) return toast("check at least one army in the list first");
+    if(!campPend.length) return toast("ADD at least one unit key first");
+    var lines=[];
+    cq.forEach(function(c){ campPend.forEach(function(k){ lines.push("grant "+c+" "+k); }); });
+    campSend(lines);   // the module rescans rosters itself after a grant batch
+    return;
+  }
   var pt=clickPts.length?clickPts[clickPts.length-1]:null;
   // battlefield probes: no unit target needed
   if(a==="vp") return fire("vp");
-  if(a==="ships") return fire("ships");
   if(a==="elev"){
     if(!pt){ toast("click the map to set the sample point first"); return; }
     return fire("elev "+fx(pt[0])+" "+fx(pt[1]));
   }
+  if(a==="bldall")                         // one shot: whole registry, v1 walk
+    return fire("bld 99999 v1");
   if(a==="bldprobe"){                      // each click: next chunk of the registry
     var bm2=(document.getElementById("bmode")||{value:"full"}).value;
     return fire("bld "+Math.max(1,Math.round(num("bchunk",250)))+
@@ -2070,8 +2386,8 @@ function conAct(a){
   function needPt(){ if(!pt){toast("left-click the map to set a point first");return false;}
     return true; }
   if(a==="occupy"){ if(!needPt())return; line="occupy "+k+" "+fx(pt[0])+" "+fx(pt[1])+" "+run; }
-  else if(a==="halt") line="halt "+k;
-  else if(a==="withdraw") line="withdraw "+k+" "+run;
+  else if(a==="halt"){ delete atkLines[k]; line="halt "+k; }
+  else if(a==="withdraw"){ delete atkLines[k]; line="withdraw "+k+" "+run; }
   else if(a==="rotm") line="rotate "+k+" -45";
   else if(a==="rotp") line="rotate "+k+" 45";
   else if(a==="stepf") line="stepf "+k;
@@ -2081,12 +2397,13 @@ function conAct(a){
   else if(a==="mlee1") line="mlee "+k+" 1";
   else if(a==="mlee0") line="mlee "+k+" 0";
   else if(a==="shot"){ var sn=val("shot");
-    if(!sn){toast("enter a shot-type name");return;} line="shot "+k+" "+sn; }
+    if(!sn){toast("no shot key - the targeted unit has no missile weapon");return;}
+    line="shot "+k+" "+sn; }
   else if(a==="beh1"||a==="beh0") line="beh "+k+" "+val("behsel")+" "+(a==="beh1"?1:0);
   else if(a==="winc") line="winc "+k;
   else if(a==="wdec") line="wdec "+k;
   else if(a==="abil"){ var an=val("abil").split(/\s+/)[0];
-    if(!an){toast("enter an ability name");return;} line="abil "+k+" "+an; }
+    if(!an){toast("no form_* on this unit's DB roster");return;} line="abil "+k+" "+an; }
   else if(a==="take"||a==="release"||a==="leavebld")
     line=a+" "+k;
   else if(a==="battk"||a==="climb"||a==="defendbld")
@@ -2125,6 +2442,63 @@ function toggleFreeze(){
   var b=document.getElementById("frz");
   b.className=frozen?"on":"";
   b.textContent=frozen?"AI: FROZEN":"AI: FREE";
+}
+// campaign mailbox: fire-and-forget lines; acks surface in the tab's
+// "recent orders" list, effect surfaces in the re-scanned rosters
+function campSend(lines){
+  post("/camp_order",{lines:lines},function(d){
+    if(d&&d.ok) toast("→ campaign: "+lines.length+" order"+(lines.length>1?"s":"")+" sent");
+    else toast("campaign send failed: "+((d&&d.error)||"?"));
+  });
+}
+function renderCPend(){
+  var el=document.getElementById("cpending"); if(!el) return;
+  if(!campPend.length){ el.innerHTML="(no units listed)"; return; }
+  el.innerHTML=campPend.map(function(k,i){
+    return '<code style="cursor:pointer" title="click to remove" data-i="'+i+'">'+
+      esc(k)+'</code>';
+  }).join(" ");
+  el.querySelectorAll("code").forEach(function(c2){
+    c2.onclick=function(){ campPend.splice(+c2.dataset.i,1); renderCPend(); };
+  });
+}
+function rosterLine(us){   // condense ["a","a","b"] -> "2x a, b"
+  var c={}; us.forEach(function(k){ c[k]=(c[k]||0)+1; });
+  return Object.keys(c).map(function(k){
+    return (c[k]>1?c[k]+"× ":"")+k; }).join(", ");
+}
+// walls/deployables pickers: filled ONLY from real probe dumps of THIS battle
+// (bld scan rows / aeq engine rows) -- never from guessed values
+var siegeSig=null;   // rebuild only when the probe data actually changed
+function renderSiegeSel(force){
+  var sig=(((bldData&&bldData.rows)||[]).length)+":"+
+          (((aeqData&&aeqData.rows)||[]).length)+":"+
+          ((bldData&&bldData.battle_id)||"")+":"+((aeqData&&aeqData.battle_id)||"");
+  if(!force&&sig===siegeSig) return;
+  siegeSig=sig;
+  var dl=document.getElementById("sbilist");
+  if(dl){
+    var rows=(bldData&&bldData.rows)||[], named=[], h="";
+    rows.forEach(function(r){ if(r.name&&r.i!=null) named.push(r); });
+    named.slice(0,2000).forEach(function(r){   // cap: geometry-cap precedent
+      h+='<option value="'+r.i+'">'+esc(r.name)+'</option>'; });
+    dl.innerHTML=h;
+    var sh=document.getElementById("sbihint");
+    if(sh&&named.length) sh.textContent="type-ahead: "+
+      Math.min(named.length,2000)+" scanned rows (#idx = name)"+
+      (named.length>2000?" - first 2000 listed, any idx still valid":"");
+  }
+  var sel=document.getElementById("sdi");
+  if(sel){
+    var evs=(aeqData&&aeqData.rows)||[], sh2=document.getElementById("sdihint");
+    sel.innerHTML=evs.map(function(v2){
+      return '<option value="'+v2.i+'">#'+v2.i+' '+esc(v2.name||"engine")+
+        (v2.x!=null?" ("+fx(v2.x)+","+fx(v2.z)+")":"")+'</option>'; }).join("");
+    sel.disabled=!evs.length;
+    if(sh2) sh2.textContent=evs.length?
+      "the battle's probed engines (SIEGE ENGINES probe)":
+      "run SIEGE ENGINES (READ > Buildings) first - 0 outside sieges";
+  }
 }
 function fire(line){
   toast("→ "+line);
@@ -2285,7 +2659,9 @@ function howTo(it){
   if(has("battle-phase")||has("player-side")||has("commander")) return "top bar + this panel show the live values";
   if(has("camera")) return "this panel shows camera pos/target live - move your view";
   // writes: specific levers first
-  if(has("set-ammo-type")) return "FAIL 07-29: the engine rejects card names ('does not support this shot type') - the valid values are DB shot-type keys; surfacing each unit's own key list is the next attacking-category fix";
+  if(has("set-ammo-type")) return "WRITE > attacking: the shot dropdown lists the TARGETED unit's own DB projectile keys (default first) - pick one, SET, watch the projectile change (flaming = the easy tell). The 07-29 fail was card labels ('Heavy Shot'); these keys are the other namespace candidate";
+  if(has("attack-ground")) return "WRITE consoles: alt+right-click the ground (ARTILLERY: plain right-click fires at ground, alt+right moves it) - red dashed line to the point = the standing order";
+  if(has("attack-unit")) return "WRITE consoles: with a unit targeted, LEFT-click the enemy unit (right-click works too) - red dashed line tracking the victim = the standing order; it clears on halt/withdraw/any new order";
   if(has("cast-general")) return "GENERAL page: select the AI general's unit (army slot 1) - FIRE an att_gen_rally_0N (star level must match his command stars); a visible rally aura in game is the verdict (rally on any other unit errors 'does not support')";
   if(has("set-formation")) return "stances WRITE console form_* box, or the form_* fire buttons on the stances read panel - Theo 07-29: some fire visibly, some silently no-op; what separates them is the open question";
   if(has("use-ability")) return "ABILITIES panel FIRE buttons (unit-ability tier - formations live on the stances page) - the verdict is whether the EFFECT visibly happens in game (Theo 07-29: some do, some don't)";
@@ -2294,13 +2670,13 @@ function howTo(it){
   if(has("enable-disable")) return "control panel: enable/disable on/off - what change_enabled visibly does to the unit is exactly the open question";
   if(has("deploy-reinforcement")) return "WRITE console > control: reinforcement deploy on/off - the call acks now; the true effect needs a battle with reinforcements due";
   if(has("equip-item")) return "DEAD END so far: no mechanism found in any layer - nothing to test";
-  if(has("mount-climb")||has("dismount")||has("defend-building")||has("use-siege")) return "WRITE > walls console: run BLD PROBE / AEQ PROBE first (READ > Buildings), then CLIMB/LEAVE/DEFEND/OCCUPY by index - siege battle";
-  if(has("attack-building")) return "WRITE > walls console: ATTACK BLDG by row index (run SHOW BUILDINGS first) - siege battle; (the scripted-destroy button was removed from the buildings panel at Theo's request 07-31 - the verb still exists in the harness)";
+  if(has("mount-climb")||has("dismount")||has("defend-building")||has("use-siege")) return "WRITE > walls console: run the SCAN (buildings) / SIEGE ENGINES probes first (READ > Buildings), then CLIMB/LEAVE/DEFEND/OCCUPY by index - siege battle";
+  if(has("attack-building")) return "map flow: target a unit, run SCAN ALL (buildings page), then LEFT-CLICK any building square = attack order on it (red dashed line unit->building shows the standing order; a new right-click order clears it). Console alternative: WRITE > walls, ATTACK BLDG by row index. The instant scripted-destroy cheat (building:destroy) was removed entirely 08-01";
   if(has("disembark")||(has("naval")&&id.indexOf("write-")===0)) return "needs a NAVAL battle (ram/board are T4 - no Lua verb)";
   // reads that need special battles (after the specific write rules)
-  if(has("reinforcement")) return "battle-flow panel: per-army reinforcement + reinf-ship counts are live rows (a battle with reinforcements due makes them nonzero)";
-  if(has("naval")||has("ships-list")) return "battle-flow panel: ships row per army is live (0 on land - a NAVAL battle lights it)";
-  if(has("buildings")||has("siege")) return "buildings panel: VERDICT 07-31 - the Lua scan route is CLOSED (cold registry slots are undetectable: cold metatable = warm metatable; even a names-only touch kills the feed; warmth is a live streaming state, so no timing rule helps). Buildings continue on the native/static route: offline map geometry (SIEGE_GEOMETRY.md, solved) + map identity via the native DLL. The scan buttons remain for deliberate throwaway experiments; AEQ PROBE = assault equipment";
+  if(has("equipment")) return "buildings & siege page: SIEGE ENGINES button enumerates the assault vehicles onto the map (diamonds) + the panel list. VERIFIED 08-01: positions work (4/4); the vehicle surface exposes position ONLY - owner/crew ('claimed') has no Lua getter and is a native (T3) target";
+  if(has("buildings")||has("siege")) return "buildings panel: SOLVED 08-01 - SCAN NEXT in v1 mode walks the registry chunk by chunk onto the map (navy = allied, maroon = enemy, amber = unowned; hover a square for name/hp/#idx); a full 10,007-entry walk verified with the feed alive. Caveat: a COLD registry (07-31 settlement save) can still kill the feed on first touch - if it freezes, quit and retry later. SIEGE ENGINES = the separate assault-vehicle probe";
+  if(has("grant-unit")||has("army-roster")) return "CAMPAIGN tab: REFRESH ARMIES, check target armies, ADD unit keys, GRANT. The roster line under each army IS the read; it growing right after a grant is the write proof (OK ack alone proves nothing). Campaign map only - orders sent mid-battle wait until you return";
   if(has("elevation")) return "terrain panel: click the map, ELEV SAMPLE - the ground height comes back as OK = <value> on the ack line";
   if(id.indexOf("write-")===0) return "order console above: frozen AI target, fire the verb, watch the field + ack chip";
   return "no dedicated lever wired - method: "+it.method+" (tell Claude in notes if you want one built)";
@@ -2322,23 +2698,47 @@ function updateTop(){
     (runMode?' \u00b7 <b style="color:var(--gold)">RUN</b>':'');
   w.style.display=(state&&state.phase==="conflict")?"none":"inline-block";
 }
-var cmds=null, bldData=null, capevData=null;
+var cmds=null, bldData=null, aeqData=null, capevData=null;
+var campData=null, campAck=null, campSel={}, campPend=[];   // campaign spawn tab
+var atkLines={};                 // cockpit-ordered building attacks: key -> target
+var lastBid=null;                // battle id watch: new battle = reset the layers
+function sameBattle(d){          // only show scan data from THIS battle:
+  if(!d) return false;           // when the feed names a battle, unstamped
+  if(!state||!state.battle_id) return true;  // (old-pack) data is STALE too
+  return d.battle_id===state.battle_id;
+}
 function poll(){
   fetch("/state",{cache:"no-store"}).then(function(r){return r.json();})
     .then(function(d){
       state=d.battle||null;
       feedAge=(d.battle_age==null?null:d.battle_age);
+      var bid=state&&state.battle_id;
+      if(bid&&bid!==lastBid){    // new battle: clear buildings/engines/orders
+        if(lastBid!=null){ bldData=null; aeqData=null; atkLines={}; }
+        lastBid=bid;
+      }
       updateTop(); renderDetail(); renderTsel(); renderUlist();
     }).catch(function(){ feedAge=null; updateTop(); });
   if(mapKind==="r_orders"||mapKind==="r_abil"||mapKind==="r_stance")
     fetch("/cmds",{cache:"no-store"}).then(function(r){return r.json();})
       .then(function(d){ cmds=d; }).catch(function(){});
-  if(mapKind==="r_bld")
+  if(mapKind==="r_bld"||mapKind.charAt(0)==="w"){
     fetch("/bld",{cache:"no-store"}).then(function(r){return r.json();})
-      .then(function(d){ bldData=d; }).catch(function(){});
+      .then(function(d){ bldData=sameBattle(d)?d:null; renderSiegeSel(); })
+      .catch(function(){});
+    fetch("/aeq",{cache:"no-store"}).then(function(r){return r.json();})
+      .then(function(d){ aeqData=sameBattle(d)?d:null; renderSiegeSel(); })
+      .catch(function(){});
+  }
   if(mapKind==="r_vp")
     fetch("/capev",{cache:"no-store"}).then(function(r){return r.json();})
       .then(function(d){ capevData=d; }).catch(function(){});
+  if(mapKind==="c_spawn"){
+    fetch("/armies",{cache:"no-store"}).then(function(r){return r.json();})
+      .then(function(d){ campData=d; }).catch(function(){});
+    fetch("/camp_ack",{cache:"no-store"}).then(function(r){return r.json();})
+      .then(function(d){ campAck=d; }).catch(function(){});
+  }
 }
 // display name for an ability key: the game's own localisation (the
 // abilitystats "names" map) with a readable fallback while it loads
@@ -2503,6 +2903,15 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/bld":
             bl, _age = read_json(BLD_FILE)
             self._send(json.dumps(bl if bl else {}))
+        elif p == "/aeq":
+            aq, _age = read_json(AEQ_FILE)
+            self._send(json.dumps(aq if aq else {}))
+        elif p == "/armies":
+            ar, _age = read_json(ARMIES_FILE)
+            self._send(json.dumps(ar if ar else {}))
+        elif p == "/camp_ack":
+            ca, _age = read_json(CAMP_ACK_FILE)
+            self._send(json.dumps(ca if ca else {}))
         elif p == "/capev":
             cv, _age = read_json(CAPEV_FILE)
             self._send(json.dumps(cv if cv else {}))
@@ -2512,7 +2921,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path not in ("/verdict", "/test_order", "/notes"):
+        if self.path not in ("/verdict", "/test_order", "/notes", "/camp_order"):
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -2526,6 +2935,9 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/notes":
                 save_notes(req.get("text", ""))
                 self._send(json.dumps({"ok": True}))
+            elif self.path == "/camp_order":
+                ids = send_camp_orders(req)
+                self._send(json.dumps({"ok": True, "ids": ids}))
             else:  # /test_order
                 seq, queued = send_test_order(req)
                 self._send(json.dumps({"ok": True, "seq": seq, "queued": queued}))
@@ -2553,7 +2965,28 @@ class QuietServer(ThreadingHTTPServer):
         log("request error from %s: %r" % (client_address, sys.exc_info()[1]))
 
 
+def _already_serving():
+    """Duplicate guard (08-01): Windows lets an explicit 127.0.0.1 listener
+    coexist with another process's dual-stack [::] listener on the SAME port,
+    so allow_reuse_address=False alone cannot prevent two live cockpits (v4
+    and v6 splitting the browser's localhost traffic between two builds).
+    Probe both stacks; refuse to start if anyone already answers."""
+    import urllib.request
+    for host in ("127.0.0.1", "[::1]"):
+        try:
+            urllib.request.urlopen("http://%s:%d/state" % (host, PORT), timeout=1.5)
+            return host
+        except Exception:
+            pass
+    return None
+
+
 def main():
+    dup = _already_serving()
+    if dup:
+        log("cockpit ALREADY SERVING on %s:%d - refusing to start a duplicate; "
+            "kill the old process first" % (dup, PORT))
+        return
     server = None
     for family, addr in ((socket.AF_INET6, ("::", PORT)), (socket.AF_INET, ("127.0.0.1", PORT))):
         QuietServer.address_family = family

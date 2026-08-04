@@ -40,6 +40,12 @@ _GAME_DATA = (
 _PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PACK = os.path.join(_GAME_DATA, "data.pack")
 LOCAL_PACK = os.path.join(_GAME_DATA, "local_en.pack")
+
+# Per-unit shot_types emission (the cockpit ammo picker's data source).
+# Was paused in the 08-01 crash revert, re-enabled same evening at Theo's ask:
+# db.lua PROVABLY never parses this file in-game (presence check only), so the
+# emission cannot affect the game -- cockpit-only data.
+EMIT_SHOT_TYPES = True
 OUT_PATHS = [
     os.path.join(_GAME_DATA, "aai_unit_stats.json"),
     os.path.join(_PROJECT, "reference", "aai_unit_stats.json"),
@@ -121,6 +127,15 @@ SCHEMAS = {
         ("shield_piercing", "Boolean"), ("weapon_length", "F32"), ("melee_weapon_type", "StringU8"),
         ("audio_material", "StringU8"), ("building_damage", "F32"),
     ]),
+    # alternate shot types per missile weapon (the change_shot_type namespace
+    # candidates: projectile keys like att_arrow_composite_heavy) -- no version
+    # marker in the shipped table header, hence None.
+    # NOTE 08-01 evening: shot_types emission is PAUSED (see EMIT_SHOT_TYPES) --
+    # the first battle loaded after the 17:02 regen crashed at vanilla tick 4
+    # (prime suspect in that revert); re-enable as its own isolated experiment.
+    "missile_weapons_to_projectiles": (
+        r"db\missile_weapons_to_projectiles_tables\missile_weapons_to_projectiles", None, [
+        ("missile_weapon", "StringU8"), ("projectile", "StringU8")]),
     "missile_weapons": (r"db\missile_weapons_tables\missile_weapons", 6, [
         ("key", "StringU8"), ("precursor", "Boolean"), ("default_projectile", "StringU8"),
         ("can_fire_at_buildings", "Boolean"),
@@ -508,6 +523,10 @@ def build(pack_path):
         melee      = keyed(load_table(f, index, "melee_weapons"), "key")
         missile    = keyed(load_table(f, index, "missile_weapons"), "key")
         projectile = keyed(load_table(f, index, "projectiles"), "key")
+        alt_shots  = {}      # missile_weapon -> [alternate projectile keys]
+        if EMIT_SHOT_TYPES:
+            for r in load_table(f, index, "missile_weapons_to_projectiles"):
+                alt_shots.setdefault(r["missile_weapon"], []).append(r["projectile"])
         junction   = load_table(f, index, "land_units_to_unit_abilites_junctions")
         spacings   = keyed(load_table(f, index, "unit_spacings"), "key")
         attr_junc  = load_table(f, index, "unit_attributes_to_groups_junctions")
@@ -657,6 +676,11 @@ def build(pack_path):
             cov["missile_range"][1] += 1
             mwpn = missile.get(lu["primary_missile_weapon"])
             if mwpn is not None:
+                # default first, then the weapon's alternates -- the harness
+                # shot-type picker offers exactly this list
+                if EMIT_SHOT_TYPES:
+                    s["shot_types"] = ([mwpn["default_projectile"]] +
+                                       alt_shots.get(lu["primary_missile_weapon"], []))
                 proj = projectile.get(mwpn["default_projectile"])
                 if proj is not None:
                     s["missile_range"] = proj["effective_range"]
@@ -724,6 +748,11 @@ def build(pack_path):
                 s["engine_can_move"] = bool(eng["can_move"])
                 emw = missile.get(eng["missile_weapon"]) if eng["missile_weapon"] else None
                 if emw is not None:
+                    # artillery shot types live on the ENGINE's missile weapon,
+                    # not land_units.primary_missile_weapon
+                    if EMIT_SHOT_TYPES and "shot_types" not in s:
+                        s["shot_types"] = ([emw["default_projectile"]] +
+                                           alt_shots.get(eng["missile_weapon"], []))
                     eproj = projectile.get(emw["default_projectile"])
                     if eproj is not None:
                         s["engine_missile_range"] = eproj["effective_range"]
