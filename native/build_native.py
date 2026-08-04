@@ -6,7 +6,7 @@ Requires the i686 mingw-w64 cross-compiler
 (WSL: gcc-mingw-w64-i686; Windows: MSYS2 mingw-w64-i686-gcc, found via C:\\msys64).
 Usage: python3 native/build_native.py
 """
-import os, shutil, subprocess, sys
+import os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAME_DATA = (
@@ -46,18 +46,10 @@ def main():
         deps = [l.split()[-1] for l in out.splitlines() if "DLL Name" in l]
         print("runtime DLL deps:", ", ".join(deps) or "(none)")
         # Print the export table too: a stale install is otherwise invisible
-        # until a Lua module quietly fails to resolve its symbol.
-        exports, seen = [], False
-        for line in out.splitlines():
-            if "Ordinal/Name Pointer" in line:
-                seen = True
-                continue
-            if seen:
-                parts = line.split()
-                if len(parts) == 2 and parts[0].startswith("["):
-                    exports.append(parts[1])
-                elif line.strip() == "" and exports:
-                    break
+        # until a Lua module quietly fails to resolve its symbol. objdump -p
+        # prints them as "[   0] +base[   1]  0000 name".
+        exports = re.findall(r"^\s*\[\s*\d+\]\s+\+base\[\s*\d+\]\s+\S+\s+(\S+)\s*$",
+                             out, re.M)
         print("exports:", ", ".join(exports) or "(none parsed)")
     except Exception as e:
         print("objdump skipped:", e)
