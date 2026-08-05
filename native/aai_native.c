@@ -691,6 +691,17 @@ typedef void *(__attribute__((__fastcall__)) *pfn_strcopy)(void *dst, void *edx,
  * bounds check, so an overlong path is a stack smash rather than a truncation. */
 static const char AAI_CHUNK_PATH[] = "data/aai/aai_attach.lua";
 
+/* Outcome channel for the Lua installer's crash-breaker: one word in a tiny
+ * file, truncated each attempt. "ARMED*" => an attach was initiated (the
+ * inflight marker must survive until the chunk's bring-up clears it);
+ * "REFUSE*" => nothing written, no attach coming, marker can be dropped.
+ * Written at every exit so the ONLY way the file stays absent is a fault
+ * inside the arm itself -- which the breaker then catches via the marker. */
+static void arm_status(const char *msg) {
+    FILE *s = fopen("data/aai_arm_status.txt", "w");
+    if (s) { fprintf(s, "%s\n", msg); fclose(s); }
+}
+
 /* aai_attach_arm() -> nothing pushed. Report: data/aai_attach_install.txt.
  * Refuses (writing nothing) unless every precondition passes. */
 __declspec(dllexport) int aai_attach_arm(void *L) {
@@ -713,7 +724,8 @@ __declspec(dllexport) int aai_attach_arm(void *L) {
             (unsigned long)GetCurrentProcessId());
 
     base = GetModuleHandleA("empire.retail.dll");
-    if (!base) { fprintf(f, "  REFUSE: engine module not found\n"); fclose(f); return 0; }
+    if (!base) { fprintf(f, "  REFUSE: engine module not found\n");
+                 arm_status("REFUSE no-module"); fclose(f); return 0; }
     bias      = (unsigned)(UINT_PTR)base - IMAGE_BASE;
     vt_battle = VA_BATTLE_ENV_VTABLE + bias;
     vt_emplua = VA_EMPIRELUAENV_VTABLE + bias;
@@ -728,11 +740,11 @@ __declspec(dllexport) int aai_attach_arm(void *L) {
     if (n_stack != 1 || !B) {
         fprintf(f, "  REFUSE: stack anchor found %u BATTLE_ENV (need exactly 1)\n",
                 n_stack);
-        fclose(f); return 0;
+        arm_status("REFUSE anchor"); fclose(f); return 0;
     }
     if (armed_for == B) {
         fprintf(f, "  REFUSE: already armed for %p this process\n", B);
-        fclose(f); return 0;
+        arm_status("REFUSE already-armed"); fclose(f); return 0;
     }
     fprintf(f, "  BATTLE_ENV = %p (stack-anchored)  bias=%08x\n", B, bias);
 
@@ -750,7 +762,7 @@ __declspec(dllexport) int aai_attach_arm(void *L) {
     fprintf(f, "  P5 pre-line-205    : %s\n", ok_timing ? "PASS" : "FAIL");
     if (!ok_guard || !ok_prist || !ok_timing) {
         fprintf(f, "  REFUSE: precondition failed -- nothing written\n");
-        fclose(f); return 0;
+        arm_status("REFUSE precondition"); fclose(f); return 0;
     }
 
     /* THE WRITE: one call into the engine's own std::string copy-ctor. */
@@ -767,13 +779,16 @@ __declspec(dllexport) int aai_attach_arm(void *L) {
     /* read back through RPM -- never a raw deref */
     if (rd_stdstr((const char *)B + OFF_B_SCRIPTPATH, pathbuf, sizeof(pathbuf),
                   &len, raw) && len == src.size &&
-        strcmp(pathbuf, AAI_CHUNK_PATH) == 0)
+        strcmp(pathbuf, AAI_CHUNK_PATH) == 0) {
         fprintf(f, "  ARMED: raw{size=%u cap=%u ptr=%08x} \"%s\"\n"
                    "  => the engine's own gate should now attach on this battle\n",
                 raw[0], raw[1], raw[2], pathbuf);
-    else
+        arm_status("ARMED");
+    } else {
         fprintf(f, "  *** READ-BACK FAILED raw{%u,%u,%08x} -- expect no attach\n",
                 raw[0], raw[1], raw[2]);
+        arm_status("ARMED-UNVERIFIED");   /* write happened: guard it anyway */
+    }
     fclose(f);
     return 0;
 }

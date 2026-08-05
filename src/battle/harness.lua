@@ -855,6 +855,25 @@ function M.init(core)
 	if bless then
 		mkvec = bless(function(x, z) return v(x, z); end);
 	end;
+	-- phase hint (custom-battle mid-battle reload; nil in campaign)
+	local hint = rawget(_G, "aai_phase");
+	if type(hint) == "string" then
+		phase = hint;
+	end;
+	-- pre-consume whatever order already sits in the mailbox: it belongs to
+	-- a previous life (an earlier battle, or the stack before a reload) --
+	-- without this, a fresh last_seq of -1 re-executes the last old order
+	pcall(function()
+		local fh = io.open(ORDER, "r");
+		if fh then
+			local l1 = fh:read("*l") or "";
+			fh:close();
+			local sq = tonumber(string.match(l1, "^seq%s+(%d+)"));
+			if sq and sq > last_seq then
+				last_seq = sq;
+			end;
+		end;
+	end);
 	-- clean slate on disk each battle (stale-layer bug 08-01: the cockpit
 	-- was rendering the PREVIOUS battle's building/engine scans): empty
 	-- files stamped with this battle's id, overwritten by real scans
