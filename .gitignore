@@ -1,9 +1,12 @@
 cluade-codex/
 
-# docs (*.md) are tracked; reference/ data extracts stay local (regenerable)
+# docs are LOCAL-ONLY (purged from git history 2026-08-14) -- never re-commit
+*.md
+*.txt
+
+# reference/ data extracts stay local (regenerable)
 reference/**
 !reference/**/
-!reference/**/*.md
 
 # scan state / build artifacts
 *.pack
