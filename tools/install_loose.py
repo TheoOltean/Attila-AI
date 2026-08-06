@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Mirror src/*.lua into the game's data/aai_dev/ dev shadow.
 
-The custom-battle kernel (src/aai_attach.lua) prepends a package.loaders
-searcher that reads data/aai_dev/ with stdio, so these copies shadow the
+The custom-battle kernel (src/aai_attach.lua) executes these copies with
+stdio + loadstring and parks them in package.loaded, so they shadow the
 pack for every module require -- edits land without a pack rebuild (and,
-via the cockpit's "sync + reload" button, mid-battle). The cockpit's
-/reload route does this same copy itself; this CLI exists for syncing
-without the viz running.
+via the cockpit's "sync + reload" button, mid-battle). It NEVER touches
+package.loaders: that crashed the game 3/3 at loading-screen end.
+
+The KERNEL itself is exempt -- the engine loads it from the pack by name,
+so kernel edits still need py tools/build_pack.py. The cockpit's /reload
+route does this same copy itself; this CLI exists for syncing without the
+viz running.
 
 Usage: py tools/install_loose.py
 """

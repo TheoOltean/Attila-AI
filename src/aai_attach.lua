@@ -70,14 +70,29 @@ if r5 then
 	r5:close();
 	w("");
 	w("==== RUN5-MODE (data/aai_run5.txt): executing aai_run5.lua verbatim ====");
-	local fn5, ferr5 = loadfile("data/aai/aai_run5.lua");
+	-- REAL DISK first (data/aai_dev/, synced by install_loose): plain stdio is
+	-- the read path this world is proven to have. loadfile on the pack path is
+	-- only a fallback -- Lua's loadfile is NOT known to resolve through the VFS,
+	-- so a pack-only aai_run5.lua may simply be unreachable from here.
+	local fn5, ferr5;
+	local fh5 = io.open("data/aai_dev/aai_run5.lua", "r");
+	if fh5 then
+		local src5 = fh5:read("*a");
+		fh5:close();
+		w("  run5 source: data/aai_dev/aai_run5.lua (" .. tostring(string.len(src5))
+			.. " bytes)");
+		fn5, ferr5 = loadstring(src5, "@data/aai_dev/aai_run5.lua");
+	else
+		w("  run5 source: loadfile data/aai/aai_run5.lua (pack path)");
+		fn5, ferr5 = loadfile("data/aai/aai_run5.lua");
+	end;
 	if fn5 then
 		local okr, rerr = pcall(fn5);
 		if not okr then
 			w("  run5-mode ERROR: " .. tostring(rerr));
 		end;
 	else
-		w("  run5-mode loadfile FAILED: " .. tostring(ferr5));
+		w("  run5-mode load FAILED: " .. tostring(ferr5));
 	end;
 	return;
 end;
@@ -85,6 +100,25 @@ end;
 w("");
 w("==== aai_attach.lua RUN 6 -- KERNEL ====");
 try("time", function() w("time: " .. os.date("%Y-%m-%d %H:%M:%S")); end);
+
+-- ---- 0. bisect rungs: one lever file each, ALL DEFAULT OFF ------------
+-- Flip exactly ONE per battle (they overlap: nophase suppresses the events
+-- writes that late_timer needs). Absent files = the normal run-6 kernel, so
+-- this block changes nothing until a file is created in the game's data/.
+local function lever(name)
+	local fh = io.open("data/" .. name, "r");
+	if fh then
+		fh:close();
+		return true;
+	end;
+	return false;
+end;
+local L_NODEV = lever("aai_k_nodev.txt");		-- pack modules only (run-5 route)
+local L_NOPHASE = lever("aai_k_nophase.txt");	-- no phase tracker, no events writes
+local L_NOPAYLOAD = lever("aai_k_nopayload.txt");	-- kernel + timer, nothing else
+local L_LATE = lever("aai_t_late.txt");		-- register the pump from an event
+w("  rungs: nodev=" .. tostring(L_NODEV) .. " nophase=" .. tostring(L_NOPHASE)
+	.. " nopayload=" .. tostring(L_NOPAYLOAD) .. " late_timer=" .. tostring(L_LATE));
 
 -- ---- 1. recover the privileged table (proven route) -------------------
 local P = nil;
@@ -233,6 +267,10 @@ end;
 rawset(_G, "aai_phase", "loading");
 local ev_snap = {};
 try("phase+snapshot", function()
+	if L_NOPHASE then
+		w("  phase tracker SKIPPED (aai_k_nophase.txt) -- zero events writes");
+		return;
+	end;
 	local ev = rawget(_G, "events");
 	if type(ev) ~= "table" then
 		w("  WARNING: no events table -- phase tracking dead");
@@ -289,9 +327,11 @@ end;
 
 local function payload_load(tag)
 	local stuffed = 0;
-	pcall(function() stuffed = dev_prestuff(); end);
+	if not L_NODEV then
+		pcall(function() stuffed = dev_prestuff(); end);
+	end;
 	local ok, err;
-	local chunk = dev_chunk(PAYLOAD_NAME);
+	local chunk = (not L_NODEV) and dev_chunk(PAYLOAD_NAME) or nil;
 	if chunk then
 		ok, err = pcall(chunk);
 		if ok then
@@ -305,7 +345,20 @@ local function payload_load(tag)
 	return ok, err;
 end;
 
-local first_ok = payload_load("initial");
+-- rung aai_k_nodev: no dev shadow at all -- the module family comes from the
+-- pack through require, exactly as VERIFIED run 5 did it. package.path is the
+-- string require searches, NOT package.loaders (run 5 appended this and lived).
+if L_NODEV then
+	pcall(function() package.path = package.path .. ";data/aai/?.lua"; end);
+end;
+
+local first_ok;
+if L_NOPAYLOAD then
+	w("  payload SKIPPED (aai_k_nopayload.txt) -- kernel + timer only, no feed");
+	first_ok = true;
+else
+	first_ok = payload_load("initial");
+end;
 
 -- kernel reached: the attach/bring-up crash window is closed -- release the
 -- crash breaker (a payload ERROR is visible in the log/ack, not a crash)
@@ -377,11 +430,69 @@ else
 			end;
 		end);
 	end);
-	local okt, errt = pcall(function()
-		battle:register_repeating_timer("aai_custom_tick", 100);
+	-- TIMER-SURFACE REPORT: register_command_handler (same object, same load
+	-- window, same rawset-by-name callback) DISPATCHES in run 6 while the
+	-- timers never fire -- so the timer methods themselves are the suspect,
+	-- not the window or the name lookup. Log what we are actually calling.
+	try("timer-surface", function()
+		local names = { "register_repeating_timer", "register_singleshot_timer",
+			"register_command_handler", "unregister_timer" };
+		local parts = {};
+		for _, nm in ipairs(names) do
+			local ok, fn = pcall(function() return battle[nm]; end);
+			parts[#parts + 1] = nm .. "=" .. (ok and type(fn) or "ERR");
+		end;
+		local mt = getmetatable(battle);
+		local idx = (type(mt) == "table") and rawget(mt, "__index") or nil;
+		local n = 0;
+		if type(idx) == "table" then
+			for _ in pairs(idx) do n = n + 1; end;
+		end;
+		w("  timer surface: " .. table.concat(parts, " ") .. " | interface "
+			.. tostring(battle) .. " methods=" .. tostring(n)
+			.. " (run 5: empire_battle, 77)");
 	end);
-	w("  register_repeating_timer(aai_custom_tick, 100) -> " ..
-		(okt and "OK" or ("ERR " .. tostring(errt))));
+
+	local function register_pump(when)
+		local okt, errt = pcall(function()
+			battle:register_repeating_timer("aai_custom_tick", 100);
+		end);
+		w("  register_repeating_timer(aai_custom_tick, 100) [" .. when .. "] -> " ..
+			(okt and "OK" or ("ERR " .. tostring(errt))));
+	end;
+
+	-- rung aai_t_late: register from INSIDE a delivered event instead of at
+	-- load. Command events dispatch fine in run 6 while timers never fire, so
+	-- if the load-window registration is what the dispatch ignores, this ticks.
+	-- Every hooked event is logged either way -- that alone tells us whether
+	-- event delivery still works in this build.
+	if L_LATE then
+		local ev = rawget(_G, "events");
+		if type(ev) ~= "table" then
+			w("  late rung IMPOSSIBLE: no events table -- registering at load");
+			register_pump("load");
+		else
+			local armed_late = false;
+			for _, nm in ipairs({ "BattleDeploymentPhaseCommenced",
+					"BattleConflictPhaseCommenced", "LoadingScreenDismissed",
+					"PanelOpenedBattle" }) do
+				ev[nm] = ev[nm] or {};
+				ev[nm][#ev[nm] + 1] = function()
+					pcall(function()
+						w("  event " .. nm .. " delivered");
+						if not armed_late then
+							armed_late = true;
+							register_pump("event " .. nm);
+						end;
+					end);
+				end;
+			end;
+			w("  pump registration DEFERRED to the first delivered event "
+				.. "(aai_t_late.txt)");
+		end;
+	else
+		register_pump("load");
+	end;
 
 	-- TIMER-DISPATCH BISECT (2026-08-05): the Plains land battle serviced
 	-- ZERO ticks all battle while yesterday's coastal battle ticked 10k+.

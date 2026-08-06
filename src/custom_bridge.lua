@@ -30,9 +30,52 @@ if battle == nil or P == nil then
 	error("custom_bridge: kernel state missing", 0);
 end;
 
+-- DISPATCH BISECT (2026-08-06), the minimal case: data/aai_payload_noop.txt
+-- returns HERE, before a single line of bridge work -- no globals, no
+-- package.path, no requires, no module chain. The kernel's dev pre-stuff has
+-- already run by this point, so this splits the last two candidates: ticks =
+-- the killer is downstream of this line (bridge body / module chain); dead =
+-- it is the pre-stuff itself, or the bare act of executing one extra chunk.
+do
+	local fh = io.open("data/aai_payload_noop.txt", "r");
+	if fh then
+		fh:close();
+		log("PAYLOAD NO-OP (aai_payload_noop.txt) -- returning before any "
+			.. "bridge work; nothing is wired up this battle");
+		return M;
+	end;
+end;
+
+-- DISPATCH BISECT (2026-08-06): kernel+timer alone ticks; this payload kills
+-- the dispatch even with every module skipped. data/aai_skip_bridge_reads.txt
+-- suppresses the payload's only two engine touches at load -- the ctor probe
+-- below and api.battery at the end -- so the chunk still executes and still
+-- publishes its globals, touching nothing. Ticks under this lever = the
+-- ENGINE CALLS are lethal from a chunk we load ourselves (run 5 made the same
+-- calls from the engine-loaded chunk's own top level and ticked 10k+). Dead
+-- under it = merely executing the payload is fatal, and the split must go.
+local NO_READS = false;
+do
+	local fh = io.open("data/aai_skip_bridge_reads.txt", "r");
+	if fh then
+		fh:close();
+		NO_READS = true;
+		log("BRIDGE READS SKIPPED (aai_skip_bridge_reads.txt) -- diagnostic "
+			.. "rung: no engine calls from this chunk, orders will not work");
+	end;
+end;
+
 -- ---- vector constructor (replaces CA's v() helper) --------------------
 local BV = rawget(P, "battle_vector");
 local mkvec = nil;
+if NO_READS then
+	-- resolved lazily instead of probed: defines the same closure shape
+	-- without calling into the engine while the chunk loads
+	mkvec = function(x, z)
+		return BV:new(x, 0, z);
+	end;
+end;
+if not NO_READS then
 pcall(function()
 	local ok3, vec3 = pcall(function() return BV:new(1, 0, 2); end);
 	if ok3 and type(vec3) == "userdata"
@@ -71,6 +114,7 @@ pcall(function()
 	end;
 	log("vector ctor: NO SHAPE TOOK -- position verbs will fail");
 end);
+end;
 
 ----------------------------------------------------------------
 --	the bridge API -- battle_entry.lua's closures on the raw interface
@@ -454,7 +498,25 @@ local bless_env = setmetatable({ v = mkvec }, { __index = _G });
 rawset(_G, "aai_bless", function(fn) return setfenv(fn, bless_env); end);
 rawset(_G, "aai_env", getfenv(1));
 
-api.battery("bridge@load");
+if not NO_READS then
+	api.battery("bridge@load");
+end;
+
+-- DISPATCH BISECT (2026-08-06), halving the bridge body: rung 5 proved the
+-- chunk may load (and the kernel's 8 pre-stuffed modules with it) without
+-- killing the dispatch, so the killer is between there and here.
+-- data/aai_skip_stack.txt returns NOW -- globals, closures and package.path
+-- are all done; only the orchestrator load below is skipped. Ticks = the
+-- killer is that load; dead = it is the bridge's own body above.
+do
+	local fh = io.open("data/aai_skip_stack.txt", "r");
+	if fh then
+		fh:close();
+		log("MODULE STACK SKIPPED (aai_skip_stack.txt) -- bridge globals are "
+			.. "published, aai_battle_state never loaded");
+		return M;
+	end;
+end;
 
 -- ---- bring up the module stack ----------------------------------------
 -- (module-family clearing + dev pre-stuff are the KERNEL's job -- by the
@@ -463,6 +525,48 @@ api.battery("bridge@load");
 -- package.loaders/require here: shared engine plumbing, see the kernel.)
 if not string.find(package.path, "data/aai/?.lua", 1, true) then
 	package.path = package.path .. ";data/aai/?.lua";
+end;
+
+-- FIX ATTEMPT 2 (2026-08-06): rung 6 (this chunk, minus the load below)
+-- TICKED; adding the load kills the dispatch with modules on OR off, and
+-- swapping its `require` for stdio changed nothing. So the suspect is now the
+-- extra chunk itself, executed from inside THIS chunk -- one nesting level
+-- deeper than the kernel's eight pre-stuffed loads, which are harmless.
+-- data/aai_inline_stack.txt does aai_battle_state's whole job right here
+-- instead: no orchestrator chunk is loaded at all. aai_core still has to be
+-- executed (nothing pre-stuffs it), so if this ticks the extra nesting level
+-- is convicted; if it dies, aai_core's own execution is the last suspect.
+do
+	local fh0 = io.open("data/aai_inline_stack.txt", "r");
+	if fh0 then
+		fh0:close();
+		log("STACK INLINED (aai_inline_stack.txt) -- aai_battle_state is not "
+			.. "loaded; its work runs in this chunk");
+		local core;
+		local ch = io.open("data/aai_dev/aai_core.lua", "r");
+		if ch then
+			local csrc = ch:read("*a");
+			ch:close();
+			local cchunk = loadstring(csrc, "@data/aai_dev/aai_core.lua");
+			if cchunk then
+				local cok, cmod = pcall(cchunk);
+				if cok and type(cmod) == "table" then
+					core = cmod;
+					pcall(function() package.loaded["aai_core"] = cmod; end);
+				end;
+			end;
+		end;
+		if core == nil then
+			log("STACK INLINED: aai_core unavailable -- stack NOT brought up");
+			return M;
+		end;
+		core.world = "battle+";
+		core.log_header("battle script state loaded (custom battlefield hook)");
+		core.load_modules({ "battle/api", "battle/publish", "battle/probe",
+			"battle/harness" });
+		log("module stack up (inlined)");
+		return M;
+	end;
 end;
 
 -- the orchestrator runs code at top level, so it loads like the payload
