@@ -675,6 +675,13 @@ end;
 --------------------------------------------------------------------------
 function M.init(core)
 	corel = core;
+	-- phase hint: a mid-battle reload must not regress to "loading" (the
+	-- phase events fired long before it). publish + harness already do this;
+	-- probe was missed, and reported phase=loading after reload #1.
+	local hint = rawget(_G, "aai_phase");
+	if type(hint) == "string" then
+		phase = hint;
+	end;
 	bm = rawget(_G, "aai_bm");
 	battle = bm and bm.battle or nil;
 	bridge = rawget(_G, "aai_api");

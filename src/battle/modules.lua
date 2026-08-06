@@ -9,6 +9,9 @@
 -------------------------------------------------------------------------
 
 return {
+	"battle/reload",   -- mid-battle hot reload. MUST STAY FIRST: it snapshots the
+	--   events table before anything else registers, and teardown truncates back
+	--   to that snapshot. Idle until data/aai_reload.txt gains a new seq.
 	"battle/api",      -- unified battle API: read_state() + issue() (providers lua+native+db)
 	"battle/publish",  -- READ driver: full snapshot -> data/aai_battle.json every 500ms
 	-- "battle/control" RETIRED 2026-07-29 with the cockpit AI-control UI (Theo:

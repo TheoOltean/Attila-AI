@@ -148,6 +148,8 @@ function M.init(core)
 			core.log("publish ERROR (tick " .. ticks .. "): " .. tostring(st));
 		end;
 		-- piggyback hooks: battle/probe + battle/harness ride this pump
+		-- (battle/reload rides it too, but LAST -- it may tear this module
+		-- down and replace it, so everything else gets its tick first)
 		local pt = rawget(_G, "aai_probe_tick");
 		if pt then
 			pt();
@@ -155,6 +157,10 @@ function M.init(core)
 		local ht = rawget(_G, "aai_harness_tick");
 		if ht then
 			ht();
+		end;
+		local rt = rawget(_G, "aai_reload_tick");
+		if rt then
+			rt();
 		end;
 	end;
 	----------------------------------------------------------------
