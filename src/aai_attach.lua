@@ -94,6 +94,11 @@ if r5 then
 	else
 		w("  run5-mode load FAILED: " .. tostring(ferr5));
 	end;
+	-- release the crash breaker exactly like the run-6 path does: this branch
+	-- returns before that line, so without this an armed run5-mode battle
+	-- leaves aai_attach_inflight.txt behind and the NEXT launch auto-disarms
+	-- itself with a red TRIPPED button (seen for real 2026-08-06 03:13).
+	pcall(os.remove, "data/aai_attach_inflight.txt");
 	return;
 end;
 
@@ -203,16 +208,19 @@ rawset(_G, "aai_tick_count", 0);
 -- writes here are scoped to OUR module names in package.loaded only.
 --
 -- DEV_ORDER lists PASSIVE modules (top-level = requires + table building,
--- no engine calls, no init) in dependency order. The two orchestrators
--- (aai_battle_state, custom_bridge) run code at top level, so they are
--- loaded directly by the kernel/payload instead (dev_chunk below).
+-- no engine calls, no init) in dependency order. custom_bridge runs code at
+-- top level, so the kernel loads it directly (dev_chunk below).
+-- aai_core + battle/modules join the list as of 2026-08-06: the kernel now
+-- brings the stack up itself, so both must be reachable without the
+-- orchestrator chunk that used to pull them in.
 local DEV_ORDER = {
-	"aai_json", "battle/db_abilities", "battle/native", "battle/db",
+	"aai_core", "aai_json", "battle/db_abilities", "battle/native", "battle/db",
 	"battle/api", "battle/publish", "battle/probe", "battle/harness",
+	"battle/modules",
 };
-local FAMILY = { "aai_json", "battle/db_abilities", "battle/native",
+local FAMILY = { "aai_core", "aai_json", "battle/db_abilities", "battle/native",
 	"battle/db", "battle/api", "battle/publish", "battle/probe",
-	"battle/harness", "aai_battle_state", "custom_bridge" };
+	"battle/harness", "battle/modules", "aai_battle_state", "custom_bridge" };
 
 local function dev_path(name)
 	return "data/aai_dev/" .. string.gsub(name, "%.", "/") .. ".lua";
@@ -345,11 +353,43 @@ local function payload_load(tag)
 	return ok, err;
 end;
 
--- rung aai_k_nodev: no dev shadow at all -- the module family comes from the
--- pack through require, exactly as VERIFIED run 5 did it. package.path is the
--- string require searches, NOT package.loaders (run 5 appended this and lived).
-if L_NODEV then
+-- package.path is the string `require` searches, NOT package.loaders (run 5
+-- appended this from its top level and ticked 10k+; the loaders table is what
+-- crashed us 3/3). The kernel owns the append now that it does its own
+-- requires -- it must not depend on the payload having run.
+if not string.find(package.path, "data/aai/?.lua", 1, true) then
 	pcall(function() package.path = package.path .. ";data/aai/?.lua"; end);
+end;
+
+-- ---- 6b. THE MODULE STACK -- brought up BY THE KERNEL ------------------
+-- 2026-08-06, nine-battle bisect (reference/CUSTOM_BATTLES.md): loading the
+-- orchestrator from inside the payload killed the engine's timer dispatch
+-- before tick 1, every time, while the identical statements from THIS chunk
+-- -- the one the engine itself loads -- tick indefinitely. Depth is what
+-- matters, not the split: the payload stays reloadable, the bring-up moves up
+-- one level. aai_battle_state is no longer used here at all (it remains the
+-- campaign hook's orchestrator, where it has always worked).
+local function stack_up(tag)
+	local function fetch(name)
+		local mod = package.loaded[name];
+		if type(mod) == "table" then
+			return mod;
+		end;
+		local ok, got = pcall(require, name);
+		return ok and got or nil;
+	end;
+	local core = fetch("aai_core");
+	local list = fetch("battle/modules");
+	if type(core) ~= "table" or type(list) ~= "table" then
+		w("  stack [" .. tag .. "] FAILED: core=" .. type(core)
+			.. " list=" .. type(list));
+		return false;
+	end;
+	core.world = "battle+";
+	core.log_header("battle script state loaded (custom battlefield hook)");
+	local ok, err = pcall(core.load_modules, list);
+	w("  module stack [" .. tag .. "] -> " .. (ok and "up" or tostring(err)));
+	return ok;
 end;
 
 local first_ok;
@@ -358,6 +398,9 @@ if L_NOPAYLOAD then
 	first_ok = true;
 else
 	first_ok = payload_load("initial");
+	if first_ok then
+		first_ok = stack_up("initial");
+	end;
 end;
 
 -- kernel reached: the attach/bring-up crash window is closed -- release the
@@ -410,6 +453,9 @@ else
 					w("  RELOAD seq " .. seq .. " at tick " .. tick_n);
 					payload_teardown();
 					local ok, err = payload_load("reload " .. seq);
+					if ok then
+						ok = stack_up("reload " .. seq);
+					end;
 					if json then
 						pcall(json.write, RELOAD_ACK, {
 							seq = seq, ok = ok and true or false,

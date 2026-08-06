@@ -48,9 +48,24 @@ end;
 
 -- load a list of module files; each returns a table with init(core).
 -- A broken module logs its error and is skipped, the rest keep going.
+-- A module is skipped when data/aai_skip_<last path element>.txt exists
+-- (aai_skip_probe.txt &c) -- the bisect lever, live in every world.
+local function skipped(name)
+	local slug = string.match(name, "([^/]+)$") or name;
+	local fh = io.open("data/aai_skip_" .. slug .. ".txt", "r");
+	if fh then
+		fh:close();
+		return true;
+	end;
+	return false;
+end;
+
 function M.load_modules(modules)
 	for i = 1, #modules do
 		local name = modules[i];
+		if skipped(name) then
+			M.log("module SKIPPED by lever: " .. name);
+		else
 		local ok, mod = pcall(require, name);
 		if not ok then
 			M.log("MODULE LOAD FAILED " .. name .. ": " .. tostring(mod));
@@ -63,6 +78,7 @@ function M.load_modules(modules)
 			end;
 		else
 			M.log("module loaded (no init): " .. name);
+		end;
 		end;
 	end;
 end;

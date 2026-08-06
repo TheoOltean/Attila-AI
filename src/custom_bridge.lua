@@ -502,96 +502,20 @@ if not NO_READS then
 	api.battery("bridge@load");
 end;
 
--- DISPATCH BISECT (2026-08-06), halving the bridge body: rung 5 proved the
--- chunk may load (and the kernel's 8 pre-stuffed modules with it) without
--- killing the dispatch, so the killer is between there and here.
--- data/aai_skip_stack.txt returns NOW -- globals, closures and package.path
--- are all done; only the orchestrator load below is skipped. Ticks = the
--- killer is that load; dead = it is the bridge's own body above.
-do
-	local fh = io.open("data/aai_skip_stack.txt", "r");
-	if fh then
-		fh:close();
-		log("MODULE STACK SKIPPED (aai_skip_stack.txt) -- bridge globals are "
-			.. "published, aai_battle_state never loaded");
-		return M;
-	end;
-end;
-
--- ---- bring up the module stack ----------------------------------------
--- (module-family clearing + dev pre-stuff are the KERNEL's job -- by the
--- time this runs, package.loaded already holds the dev copies, so the
--- requires below and inside aai_battle_state hit the cache. NEVER touch
--- package.loaders/require here: shared engine plumbing, see the kernel.)
+-- ---- the module stack is NOT brought up from here (2026-08-06) --------
+-- Loading the orchestrator from inside this chunk killed the engine's timer
+-- dispatch in every battle that did it, while the identical statements one
+-- level up -- in the chunk the ENGINE loads -- tick indefinitely (nine-battle
+-- bisect: reference/CUSTOM_BATTLES.md). The KERNEL brings the modules up
+-- itself once this payload returns. This file is the BRIDGE and nothing more.
+--
+-- package.path keeps our entry so the kernel's requires can reach the pack
+-- when a module has no dev copy. NEVER touch package.loaders here: shared
+-- engine plumbing, and it crashed the game 3/3 (see the kernel).
 if not string.find(package.path, "data/aai/?.lua", 1, true) then
 	package.path = package.path .. ";data/aai/?.lua";
 end;
 
--- FIX ATTEMPT 2 (2026-08-06): rung 6 (this chunk, minus the load below)
--- TICKED; adding the load kills the dispatch with modules on OR off, and
--- swapping its `require` for stdio changed nothing. So the suspect is now the
--- extra chunk itself, executed from inside THIS chunk -- one nesting level
--- deeper than the kernel's eight pre-stuffed loads, which are harmless.
--- data/aai_inline_stack.txt does aai_battle_state's whole job right here
--- instead: no orchestrator chunk is loaded at all. aai_core still has to be
--- executed (nothing pre-stuffs it), so if this ticks the extra nesting level
--- is convicted; if it dies, aai_core's own execution is the last suspect.
-do
-	local fh0 = io.open("data/aai_inline_stack.txt", "r");
-	if fh0 then
-		fh0:close();
-		log("STACK INLINED (aai_inline_stack.txt) -- aai_battle_state is not "
-			.. "loaded; its work runs in this chunk");
-		local core;
-		local ch = io.open("data/aai_dev/aai_core.lua", "r");
-		if ch then
-			local csrc = ch:read("*a");
-			ch:close();
-			local cchunk = loadstring(csrc, "@data/aai_dev/aai_core.lua");
-			if cchunk then
-				local cok, cmod = pcall(cchunk);
-				if cok and type(cmod) == "table" then
-					core = cmod;
-					pcall(function() package.loaded["aai_core"] = cmod; end);
-				end;
-			end;
-		end;
-		if core == nil then
-			log("STACK INLINED: aai_core unavailable -- stack NOT brought up");
-			return M;
-		end;
-		core.world = "battle+";
-		core.log_header("battle script state loaded (custom battlefield hook)");
-		core.load_modules({ "battle/api", "battle/publish", "battle/probe",
-			"battle/harness" });
-		log("module stack up (inlined)");
-		return M;
-	end;
-end;
-
--- the orchestrator runs code at top level, so it loads like the payload
--- itself: dev copy via stdio when present, else the pack
-local ok, err;
-local fh = io.open("data/aai_dev/aai_battle_state.lua", "r");
-if fh then
-	local src = fh:read("*a");
-	fh:close();
-	local chunk, cerr = loadstring(src, "@data/aai_dev/aai_battle_state.lua");
-	if chunk then
-		ok, err = pcall(chunk);
-		if ok then
-			pcall(function() package.loaded["aai_battle_state"] = true; end);
-		end;
-	else
-		ok, err = false, cerr;
-	end;
-else
-	ok, err = pcall(require, "aai_battle_state");
-end;
-if not ok then
-	log("MODULE STACK FAILED: " .. tostring(err));
-	error("custom_bridge: module stack failed: " .. tostring(err), 0);
-end;
-log("module stack up");
+log("bridge published (module stack is the kernel's job now)");
 
 return M;
