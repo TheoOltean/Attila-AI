@@ -14,6 +14,12 @@ core.log_header("frontend world loaded");
 
 core.load_modules({
 	"frontend/spawn_viz",
+	"menu_probe",  -- VM census + native-door test (custom-battle setup
+	--   lives in this world). DEFAULT-OFF: gates on data/aai_menu_probe.txt.
+	"reg_walk",  -- Door B rung 1: registry hunt for the attach machinery.
+	--   DEFAULT-OFF: self-gates on data/aai_reg_walk.txt.
+	"attach_probe",  -- Door B rung 3: negative control (no battle exists here,
+	--   so it must find no BATTLE_ENV). Gates on data/aai_attach_on.txt.
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the

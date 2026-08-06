@@ -32,6 +32,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -131,6 +132,34 @@ CAPEV_FILE = os.path.join(DATA, "aai_capev.json")
 ARMIES_FILE = os.path.join(DATA, "aai_armies.json")
 CAMP_ACK_FILE = os.path.join(DATA, "aai_camp_ack.json")
 CAMP_ORDER_FILE = os.path.join(DATA, "aai_camp_order.txt")
+# custom-battle attach lever. STICKY since run 6: it persists across battles;
+# the crash breaker (attach_install.lua) disarms it if an armed battle dies
+# inside the attach window, leaving the tripped file for the UI to show.
+ATTACH_ARM_FILE = os.path.join(DATA, "aai_attach_arm.txt")
+ATTACH_TRIPPED_FILE = os.path.join(DATA, "aai_attach_tripped.txt")
+# mid-battle reload: /reload copies src/ -> data/aai_dev/ (the kernel's dev
+# shadow loader reads these with stdio, always fresh) and bumps the seq file;
+# the in-game kernel tears the payload down and re-requires it, acking here.
+DEV_DIR = os.path.join(DATA, "aai_dev")
+SRC_DIR = os.path.join(REPO, "src")
+RELOAD_FILE = os.path.join(DATA, "aai_reload.txt")
+RELOAD_ACK_FILE = os.path.join(DATA, "aai_reload_ack.json")
+
+
+def sync_dev_files():
+    """Mirror every repo src/*.lua into the game's data/aai_dev/ shadow."""
+    copied = 0
+    for root, _dirs, files in os.walk(SRC_DIR):
+        for fn in files:
+            if not fn.endswith(".lua"):
+                continue
+            src = os.path.join(root, fn)
+            rel = os.path.relpath(src, SRC_DIR)
+            dst = os.path.join(DEV_DIR, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            copied += 1
+    return copied
 
 
 def load_notes():
@@ -483,11 +512,22 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .tw.danger:hover{border-color:var(--atk);color:var(--atk)}
   .tw:disabled{opacity:.28;cursor:default}
   .hint{color:var(--dim);font-size:11px}
+  .armb{background:none;border:1px solid var(--line);border-radius:6px;color:var(--dim);
+    padding:3px 10px;font:inherit;cursor:pointer}
+  .armb.on{border-color:var(--gold);color:var(--gold)}
+  .armb.trip{border-color:var(--atk);color:var(--atk)}
+  .stall{color:var(--atk);font-weight:bold}
 </style></head><body>
 <div id="top">
   <h1>AAI BATTLE</h1>
   <a href="/harness" style="color:var(--dim);border:1px solid var(--line);border-radius:6px;
     padding:3px 10px;text-decoration:none">harness</a>
+  <button id="armbtn" class="armb" title="STICKY: while on, every custom battle attaches
+the cockpit stack at load. The crash breaker disarms it automatically if an armed battle
+dies during attach (button turns red - click to reset + re-arm)">attach: off</button>
+  <button id="rldbtn" class="armb" title="copy the repo's src/ into the game's dev shadow
+(data/aai_dev/) and hot-swap the running stack MID-BATTLE - same battle, same units, new
+code. Outside a battle it just syncs; the copies load at the next bring-up">sync + reload</button>
   <span class="meta" id="status"></span>
 </div>
 <div id="main" style="height:calc(100% - 46px)">
@@ -719,15 +759,71 @@ cv.addEventListener("wheel",function(e){
 function updateStatus(st){
   var el=document.getElementById("status");
   if(!st){ el.innerHTML='<span style="color:#e8863b">waiting for battle…</span>'; return; }
+  // a live battle writes every ~500ms: age past 3s means the in-game pump
+  // is dead (or this is a leftover feed file from an ended battle)
+  var stall=(st.phase!=="complete"&&battleAge>3)
+    ?' · <span class="stall">FEED STALLED '+battleAge+'s</span>':' · age '+battleAge+'s';
   el.innerHTML='phase <b>'+esc(st.phase||"?")+'</b> · t <b>'+(st.t!=null?st.t.toFixed(0):"?")+
     's</b>'+(st.remaining!=null?' · rem <b>'+Math.round(st.remaining)+'s</b>':'')+
-    ' · units <b>'+allUnits(st).length+'</b> · age '+battleAge+'s';
+    ' · units <b>'+allUnits(st).length+'</b>'+stall;
 }
+
+// ---- attach arming (custom battles; sticky + crash breaker) ----
+var armed=false, tripped=false, armBtn=document.getElementById("armbtn");
+function showArmed(a,t){
+  armed=!!a; tripped=!!t;
+  armBtn.className="armb"+(tripped?" trip":(armed?" on":""));
+  armBtn.textContent=tripped?"attach TRIPPED - click to re-arm":
+    (armed?"attach: on":"attach: off");
+}
+armBtn.addEventListener("click",function(){
+  // tripped -> re-arm (clears the breaker); else plain toggle
+  fetch("/attach_arm",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({on:tripped?true:!armed})})
+    .then(function(r){return r.json();})
+    .then(function(d){ if(d&&d.ok) showArmed(d.armed,d.tripped); })
+    .catch(function(){});
+});
+
+// ---- mid-battle reload ----
+var rldBtn=document.getElementById("rldbtn"), rldTimer=null;
+function rldLabel(txt,cls){ rldBtn.textContent=txt; rldBtn.className="armb"+(cls||""); }
+rldBtn.addEventListener("click",function(){
+  if(rldTimer) return;                       // one reload in flight at a time
+  rldLabel("syncing...");
+  fetch("/reload",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d||!d.ok){ rldLabel("sync FAILED"," trip"); return; }
+      var seq=d.seq, waited=0;
+      rldLabel("synced "+d.files+" - reloading...");
+      rldTimer=setInterval(function(){       // wait for the in-game kernel's ack
+        waited+=500;
+        fetch("/reload_ack",{cache:"no-store"}).then(function(r){return r.json();})
+          .then(function(a){
+            if(a&&a.seq===seq){
+              clearInterval(rldTimer); rldTimer=null;
+              rldLabel(a.ok?"reloaded ✓":"reload ERR: "+(a.err||"?"),
+                a.ok?" on":" trip");
+              setTimeout(function(){ rldLabel("sync + reload"); },a.ok?4000:15000);
+            } else if(waited>=8000){         // no live kernel: sync-only is fine
+              clearInterval(rldTimer); rldTimer=null;
+              rldLabel("synced (applies at next battle)");
+              setTimeout(function(){ rldLabel("sync + reload"); },4000);
+            }
+          }).catch(function(){});
+      },500);
+    })
+    .catch(function(){ rldLabel("sync FAILED"," trip"); });
+});
 
 // ---- live polling ----
 function poll(){
   fetch("/state",{cache:"no-store"}).then(function(r){return r.json();}).then(function(d){
     var inc=d.battle; battleAge=(d.battle_age==null?99:d.battle_age);
+    if(d.armed!==undefined&&(d.armed!==armed||!!d.tripped!==tripped))
+      showArmed(d.armed,d.tripped);
     if(!inc){ state=null; }
     else if(allUnits(inc).length>0 || !state || allUnits(state).length===0 || inc.phase==="complete"){
       state=inc;                    // accept real frames, first frame, or battle-end
@@ -2890,7 +2986,12 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/state":
             pump_orders()
             battle, age = read_json(BATTLE_FILE)
-            self._send(json.dumps({"battle": battle, "battle_age": age}))
+            self._send(json.dumps({"battle": battle, "battle_age": age,
+                                   "armed": os.path.exists(ATTACH_ARM_FILE),
+                                   "tripped": os.path.exists(ATTACH_TRIPPED_FILE)}))
+        elif p == "/reload_ack":
+            ra, _age = read_json(RELOAD_ACK_FILE)
+            self._send(json.dumps(ra if ra else {}))
         elif p == "/geometry":
             geo, age = read_json(GEOMETRY_FILE)
             self._send(json.dumps(geo if geo else {}))
@@ -2921,7 +3022,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path not in ("/verdict", "/test_order", "/notes", "/camp_order"):
+        if self.path not in ("/verdict", "/test_order", "/notes", "/camp_order",
+                             "/attach_arm", "/reload"):
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -2932,6 +3034,31 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/verdict":
                 save_verdict(req)
                 self._send(json.dumps({"ok": True}))
+            elif self.path == "/attach_arm":
+                if req.get("on"):
+                    try:
+                        os.remove(ATTACH_TRIPPED_FILE)  # re-arm resets the breaker
+                    except OSError:
+                        pass
+                    with open(ATTACH_ARM_FILE, "w", encoding="utf-8") as f:
+                        f.write("arm\n")
+                else:
+                    try:
+                        os.remove(ATTACH_ARM_FILE)
+                    except OSError:
+                        pass
+                self._send(json.dumps(
+                    {"ok": True, "armed": os.path.exists(ATTACH_ARM_FILE),
+                     "tripped": os.path.exists(ATTACH_TRIPPED_FILE)}))
+            elif self.path == "/reload":
+                files = sync_dev_files()
+                seq = next_seq()
+                tmp = RELOAD_FILE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write("seq %d\n" % seq)
+                os.replace(tmp, RELOAD_FILE)
+                log("reload: synced %d files, seq %d" % (files, seq))
+                self._send(json.dumps({"ok": True, "seq": seq, "files": files}))
             elif self.path == "/notes":
                 save_notes(req.get("text", ""))
                 self._send(json.dumps({"ok": True}))

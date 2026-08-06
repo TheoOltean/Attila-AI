@@ -69,6 +69,14 @@ function M.init(core)
 	local bm = rawget(_G, "aai_bm");
 	local battle = bm.battle;
 
+	-- phase hint: a mid-battle (re)bring-up must not regress to "loading" --
+	-- the phase events fired long before us (custom-battle reload; the
+	-- kernel keeps _G.aai_phase current there; nil in campaign = no change)
+	local hint = rawget(_G, "aai_phase");
+	if type(hint) == "string" then
+		phase = hint;
+	end;
+
 	-- bisection lever (2026-07-27 loading-hang): skip ALL driver arming --
 	-- no engine timers, no bm:callback, no phase-event subscriptions
 	local off = io.open("data/aai_pub_off.txt", "r");

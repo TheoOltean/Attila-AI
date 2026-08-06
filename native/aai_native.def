@@ -6,3 +6,5 @@ aai_write_field
 aai_set_game_speed
 aai_snapshot
 aai_snapshot_reset
+aai_attach_probe
+aai_attach_arm

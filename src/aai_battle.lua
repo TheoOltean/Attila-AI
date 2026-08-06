@@ -12,9 +12,17 @@ core.world = "battle";
 core.log_header("battle world loaded");
 
 core.load_modules({
-	-- (none) -- the bootstrap battle world has no engine bridge
-	-- (empire_battle is injected only into the battle+ state via
-	-- battle_entry.lua). Kept as the shim require target + dev-hook host.
+	-- the bootstrap battle world has no engine bridge (empire_battle is
+	-- injected only into attached script states, e.g. battle_entry.lua).
+	"menu_probe",  -- VM census + native-door test in menu battles.
+	--   DEFAULT-OFF: self-gates on data/aai_menu_probe.txt.
+	"reg_walk",  -- Door B rung 1: registry hunt for the attach machinery.
+	--   DEFAULT-OFF: self-gates on data/aai_reg_walk.txt.
+	"attach_probe",  -- Door B rung 3: READ-ONLY native probe of the attach
+	--   gate. DEFAULT-OFF: self-gates on data/aai_attach_on.txt.
+	"attach_install",  -- Route A: THE ONE WRITE (arms BATTLE+0x64128 so the
+	--   engine attaches our chunk itself). DEFAULT-OFF: data/aai_attach_arm.txt,
+	--   which it deletes BEFORE writing so a crash cannot repeat.
 });
 
 -- dev hook: loose file data/aai/aai_dev.lua on the REAL disk (not the
