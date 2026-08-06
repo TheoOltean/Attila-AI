@@ -47,17 +47,57 @@ local spec = require "ml/spec";
 
 local M = {};
 
+local function esc(s)
+	s = string.gsub(s, "\\", "\\\\");
+	s = string.gsub(s, '"', '\\"');
+	s = string.gsub(s, "%c", " ");
+	return s;
+end;
+
 -- Lua table -> JSON string. Array iff t[1] ~= nil or empty ({} -> []).
 function M.json(t)
-	return nil, "todo(hand-rolled encoder: %.10g numbers, escape backslash+quote, control chars -> space)";
+	local ty = type(t);
+	if ty == "nil" then return "null"; end;
+	if ty == "boolean" then return t and "true" or "false"; end;
+	if ty == "number" then
+		if t ~= t or t == math.huge or t == -math.huge then return "null"; end;
+		return string.format("%.10g", t);
+	end;
+	if ty == "string" then return '"' .. esc(t) .. '"'; end;
+	if ty == "table" then
+		local parts = {};
+		if t[1] ~= nil or next(t) == nil then
+			for i = 1, #t do
+				parts[#parts + 1] = M.json(t[i]);
+			end;
+			return "[" .. table.concat(parts, ",") .. "]";
+		end;
+		for k, v in pairs(t) do
+			parts[#parts + 1] = '"' .. esc(tostring(k)) .. '":' .. M.json(v);
+		end;
+		return "{" .. table.concat(parts, ",") .. "}";
+	end;
+	return "null";
 end;
 
 function M.encode_hello(battle_id, map)
-	return nil, "todo(assemble + M.json)";
+	return M.json({
+		v = spec.SPEC_VERSION,
+		battle_id = battle_id,
+		map = map,
+		shapes = spec.shapes(),
+	});
 end;
 
+-- header carries identity + act feedback (battle_id, seq, tick, phase,
+-- applied_seq, apply_errs); obs carries the components. Merged flat --
+-- a component absent from obs is absent from the frame (partial frames
+-- are the incremental-build reality; the host displays what is there).
 function M.encode_obs(obs, header)
-	return nil, "todo(assemble + M.json)";
+	local f = { v = spec.SPEC_VERSION };
+	for k, v in pairs(header or {}) do f[k] = v; end;
+	for k, v in pairs(obs or {}) do f[k] = v; end;
+	return M.json(f);
 end;
 
 function M.encode_ack(last, ring)

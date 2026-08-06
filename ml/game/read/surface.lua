@@ -21,6 +21,7 @@
 
 local spec = require "ml/spec";
 local roster = require "ml/roster";
+local plua = require "ml/providers/lua";
 local g = require "ml/read/global";
 local units = require "ml/read/units";
 local structures = require "ml/read/structures";
@@ -33,12 +34,8 @@ local ML = nil;
 
 function M.init(core)
 	ML = core;
-	local plua = require "ml/providers/lua";
-	local pdb = require "ml/providers/db";
-	local pnative = require "ml/providers/native";
-	plua.init(core);
-	pdb.init(core);
-	pnative.init(core);
+	-- Providers are initialized by boot (their own layer step, shared with
+	-- the write surface) -- this surface only wires its assemblers.
 	g.init(core);
 	units.init(core);
 	structures.init(core);
@@ -49,15 +46,27 @@ end;
 -- True when the battle interface is live (transitional/teardown ticks
 -- read nil everywhere -- callers skip the frame, keep last-good on disk).
 function M.ready()
-	return nil, "todo(battle + bridge present; player alliance readable)";
+	if not (ML and ML.battle) then return false; end;
+	return type(plua.read(ML.battle, "local_alliance")) == "number";
 end;
 
 -- One complete observation at decision tick `tick`:
 -- { global, friendly = {types, feat}, enemy = {types, feat},
 --   structures, vehicles, aux }. Types are engine type-key strings;
 -- the host codec maps key -> vocab id (the id table is a training asset).
+-- Grows with the assemblers: a component whose assembler is still a stub
+-- returns nil and is simply absent from the frame (global is the first
+-- live one). roster.sync joins in when the unit assembler lands.
 function M.observation(tick)
-	return nil, "todo(roster.sync + assemble every component below; nil on any transitional read)";
+	if not M.ready() then return nil; end;
+	local obs = {};
+	obs.global = g.build();
+	obs.friendly = units.build("friendly");
+	obs.enemy = units.build("enemy");
+	obs.structures = structures.build();
+	obs.vehicles = vehicles.build();
+	obs.aux = M.aux();
+	return obs;
 end;
 
 -- global[40] (spec-exact, normalized).

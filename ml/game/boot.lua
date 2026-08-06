@@ -44,13 +44,23 @@ rawset(_G, "aai_ml", ML);
 -- Stamp battle identity FIRST: every out-file carries it; the host drops
 -- any payload whose battle_id differs from the live obs stream.
 local function stamp_battle_id()
-	-- todo: ML.battle_id = os.date("%Y%m%d_%H%M%S")
+	local ok, stamp = pcall(os.date, "%Y%m%d_%H%M%S");
+	ML.battle_id = (ok and stamp) or "unstamped";
 end;
 
 -- Acquire the battle interface (legal only from this chunk, at load):
 -- require "lua_scripts.Battle_Script_Header"; get_bm(); publish bm + battle.
 local function acquire_bm()
-	-- todo: pcall(require, "lua_scripts.Battle_Script_Header"); ML.bm = get_bm(); ML.battle = ML.bm.battle
+	local ok, err = pcall(require, "lua_scripts.Battle_Script_Header");
+	if not ok then
+		log("Battle_Script_Header require failed: " .. tostring(err));
+	end;
+	local ok2, bm = pcall(function() return get_bm(); end);
+	if ok2 and bm then
+		ML.bm = bm;
+		local ok3, b = pcall(function() return bm.battle; end);
+		if ok3 then ML.battle = b; end;
+	end;
 end;
 
 -- Engine-call closures for the T1 provider. Signatures are the contract;
@@ -84,12 +94,24 @@ local function publish_api()
 	A.release = function(uc) end;							-- todo: uc:release_control()
 end;
 
--- Wrap vanilla's tick dispatch slot. The wrapper body runs INSIDE engine
+-- Wrap vanilla's tick dispatch slot (registered when get_bm() built the
+-- bm -- so this runs AFTER acquire). The wrapper body runs INSIDE engine
 -- timer dispatch: fully pcall'd, kick from tick >= 50 (past the load
 -- window), always call the original.
 local function hook_vanilla_tick()
-	-- todo: wrap tick_increment_counter (v1-proven pattern); on each tick:
-	--   ML.tick = ML.tick + 1; if ML.tick >= 50 then pcall(pump.kick) end
+	local orig = rawget(_G, "tick_increment_counter");
+	if type(orig) ~= "function" then
+		log("tick_increment_counter absent -- pump has no driver");
+		return;
+	end;
+	local pump = require "ml/ipc/pump";
+	rawset(_G, "tick_increment_counter", function(...)
+		ML.tick = ML.tick + 1;
+		if ML.tick >= 50 then
+			pcall(pump.kick);
+		end;
+		return orig(...);
+	end);
 end;
 
 local function main()
@@ -100,9 +122,15 @@ local function main()
 		return;
 	end;
 	publish_api();
-	-- Module load order: surfaces first (pure), pump last (the driver).
+	-- Load order = the layer stack (ml/README.md layering law): shared core,
+	-- provider substrate, the two surfaces (pure), pump last (the driver).
 	local steps = {
 		{ "roster", function() require("ml/roster").reset(ML.battle_id); end },
+		{ "providers", function()
+			require("ml/providers/lua").init(ML);
+			require("ml/providers/db").init(ML);
+			require("ml/providers/native").init(ML);
+		end },
 		{ "read", function() require("ml/read/surface").init(ML); end },
 		{ "write", function() require("ml/write/surface").init(ML); end },
 		{ "pump", function() require("ml/ipc/pump").init(ML); end },

@@ -30,22 +30,46 @@ end;
 -- The guarded read primitive: pcall unit:method(...), unwrap a returned
 -- bound-getter function, nil on any failure. (v1-proven, reimplemented.)
 function M.read(obj, method, ...)
-	return nil, "todo(pcall obj[method](obj, ...); if function returned, call it; nil on failure)";
+	if obj == nil then return nil; end;
+	local ok, fn = pcall(function() return obj[method]; end);
+	if not ok or type(fn) ~= "function" then return nil; end;
+	local ok2, r = pcall(fn, obj, ...);
+	if not ok2 then return nil; end;
+	if type(r) == "function" then
+		local ok3, r2 = pcall(r);
+		if not ok3 then return nil; end;
+		return r2;
+	end;
+	return r;
 end;
 
 -- List :count() coerced to a number, 0 when the list is pre-population.
 function M.count(list)
-	return 0, "todo(pcall list:count(); coerce non-number to 0)";
+	local n = M.read(list, "count");
+	if type(n) ~= "number" then return 0; end;
+	return n;
 end;
 
 -- Position userdata -> x, y(elev), z triple via get_x/get_y/get_z.
 function M.vec(pos)
-	return nil, "todo(pcall get_x/get_y/get_z)";
+	local x = M.read(pos, "get_x");
+	local y = M.read(pos, "get_y");
+	local z = M.read(pos, "get_z");
+	if type(x) == "number" and type(y) == "number" and type(z) == "number" then
+		return x, y, z;
+	end;
+	return nil;
 end;
 
 -- Entry-env closure dispatch for writes: call(closure_name, uc, ...).
 function M.call(name, ...)
-	return false, "todo(route to ML.api[name], pcall'd; false,err when missing)";
+	local fn = ML and ML.api and ML.api[name];
+	if type(fn) ~= "function" then
+		return false, "no api closure: " .. tostring(name);
+	end;
+	local ok, r = pcall(fn, ...);
+	if not ok then return false, tostring(r); end;
+	return true, r;
 end;
 
 return M;

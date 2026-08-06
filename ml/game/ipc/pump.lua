@@ -38,23 +38,43 @@ local M = {};
 local ML = nil;
 local decision_tick = 0;	-- small monotonic int, the obs seq AND tick
 local said_hello = false;
+local kicks = 0;
+
+-- Vanilla kicks arrive per 100 ms sim tick; counting them rate-gates to
+-- the decision cadence sim-locked (pause freezes kicks and the feed with
+-- them -- by design).
+local KICKS_PER_DECISION = math.floor(spec.DECISION_TICK_S * 10 + 0.5);
 
 function M.init(core)
 	ML = core;
-	-- todo: register phase-flag event handlers (flag flips ONLY);
-	-- channel.reset(ML.battle_id) -- SOLE owner of the battle-start reset
+	decision_tick = 0;
+	said_hello = false;
+	kicks = 0;
+	channel.reset(ML.battle_id);	-- SOLE owner of the battle-start reset
+	-- todo: register phase-flag event handlers (flag flips ONLY) when the
+	-- write path arms -- obs flows regardless of phase.
 end;
 
 -- The 100 ms entry. Cheap early-outs first; body guarded.
 function M.kick()
-	return nil, "todo(rate-gate to DECISION_TICK_S; hello_once(); if conflict then pump_in(); write.grip_tick() elseif just_left_conflict then write.release_all() end; pump_out())";
+	kicks = kicks + 1;
+	if kicks % KICKS_PER_DECISION ~= 0 then return; end;
+	if not said_hello then pcall(M.hello_once); end;
+	-- Write path (pump_in + grip_tick, conflict-gated) not armed yet:
+	-- read-only milestone. The todos on pump_in document the shape.
+	pcall(M.pump_out);
 end;
 
 -- Steps (each pcall'd by kick; a failing step logs and skips the tick,
 -- it never kills the pump).
 
 function M.hello_once()
-	return nil, "todo(read.ready() gate; codec.encode_hello(battle_id, read.map_info()) -> channel.write)";
+	if not read.ready() then return; end;
+	local text = codec.encode_hello(ML.battle_id, read.map_info());
+	if text and channel.write(channel.PATH.hello, text) then
+		said_hello = true;
+		util.log("hello written (battle " .. tostring(ML.battle_id) .. ")");
+	end;
 end;
 
 function M.pump_in()
@@ -62,7 +82,18 @@ function M.pump_in()
 end;
 
 function M.pump_out()
-	return nil, "todo(decision_tick++; read.observation(decision_tick) -> codec.encode_obs (header: applied seq + errs) -> channel.write; nil obs = skip, keep last-good)";
+	decision_tick = decision_tick + 1;
+	local obs = read.observation(decision_tick);
+	if not obs then return; end;	-- transitional tick: last-good stays
+	local text = codec.encode_obs(obs, {
+		battle_id = ML.battle_id,
+		seq = decision_tick,
+		tick = decision_tick,
+		-- phase + applied_seq/apply_errs join with the write path
+	});
+	if text then
+		channel.write(channel.PATH.obs, text);
+	end;
 end;
 
 return M;

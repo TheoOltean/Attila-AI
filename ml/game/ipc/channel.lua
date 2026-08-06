@@ -27,16 +27,29 @@ M.PATH = {
 	act = "data/aai_ml_act.txt",		-- host -> game, atomic (os.replace)
 };
 
+local last_seq = -1;
+
 -- Wipe inbound state for a new battle: delete any stale act file, reset
 -- the seq gate to -1. Also blanks ack with an id-only stamp (so the host
 -- reads "nothing applied yet", not the previous battle's ring).
+-- battle_id is our own os.date stamp -- safe to splice into the literal.
 function M.reset(battle_id)
-	return nil, "todo(os.remove act; last_seq = -1; write id-only ack stamp)";
+	pcall(os.remove, M.PATH.act);
+	last_seq = -1;
+	M.write(M.PATH.ack,
+		'{"battle_id":"' .. tostring(battle_id) .. '","last":null,"ring":[]}');
 end;
 
 -- Game-side file write: tmp -> remove -> rename (the documented gap).
 function M.write(path, text)
-	return false, "todo(io.open tmp, write, close; os.remove(path); os.rename(tmp, path))";
+	local tmp = path .. ".tmp";
+	local f = io.open(tmp, "wb");
+	if not f then return false; end;
+	f:write(text);
+	f:close();
+	os.remove(path);
+	local ok = os.rename(tmp, path);
+	return ok and true or false;
 end;
 
 -- Poll the act file: returns raw text of a NEW frame exactly once

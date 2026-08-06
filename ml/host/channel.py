@@ -18,7 +18,9 @@ The host half of the IPC contract (game half: ml/game/ipc/channel.lua):
 
 from __future__ import annotations
 
+import json
 import os
+import time
 
 GAME_DATA = r"C:\Program Files (x86)\Steam\steamapps\common\Total War Attila\data"
 
@@ -53,11 +55,27 @@ class Channel:
 
         (None, None) only before the first successful read ever.
         """
-        raise NotImplementedError("todo: mtime cache; ENOENT/parse-fail -> cached copy")
+        path = os.path.join(self.data_dir, PATH[name])
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self._cache[name] = (payload, os.path.getmtime(path))
+        except (OSError, ValueError):
+            pass  # ENOENT (rename gap) or torn read -> serve last-good
+        if name not in self._cache:
+            return None, None
+        payload, mtime = self._cache[name]
+        return payload, max(0.0, time.time() - mtime)
 
     def poll_obs(self, last_seq: int):
         """A NEW obs frame exactly once: payload iff seq > last_seq, else None."""
-        raise NotImplementedError("todo: read_json(obs); gate on payload['seq']")
+        payload, _age = self.read_json("obs")
+        if payload is None:
+            return None
+        seq = payload.get("seq")
+        if isinstance(seq, (int, float)) and seq > last_seq:
+            return payload
+        return None
 
     def write_act(self, text: str) -> None:
         """Atomic write of one act frame (tmp + os.replace, utf-8)."""
