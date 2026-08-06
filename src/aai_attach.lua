@@ -131,36 +131,76 @@ rawset(_G, "aai_battle_id", (ok_id and batid) or "battle");	-- once per battle:
 	-- the stale-layer contract keys on this, so a reload must NOT change it
 rawset(_G, "aai_tick_count", 0);
 
--- ---- 4. dev-shadow module loader --------------------------------------
--- Loose repo copies under data/aai_dev/ shadow the pack for EVERY require.
--- stdio (io.open) reads the real disk at load time, so edited content is
--- always current -- no dependence on how the engine VFS treats loose files.
-local function dev_loader(name)
-	local path = "data/aai_dev/" .. string.gsub(name, "%.", "/") .. ".lua";
-	local fh = io.open(path, "r");
+-- ---- 4. dev shadow: package.loaded pre-stuff (NO loader mutation) -----
+-- Loose repo copies under data/aai_dev/ shadow the pack, read with stdio
+-- (always-fresh real disk, no VFS assumptions). Mechanism: execute each
+-- dev copy dependency-first and park the result in package.loaded, so the
+-- later requires hit the cache and never reach a loader at all.
+--
+-- HARD RULE (crash 3/3 on 2026-08-05): NEVER touch package.loaders or
+-- require. The vanilla bootstrap points package.path at data/ui/ -- the
+-- engine's OWN UI requires run through that same package plumbing right
+-- as the loading screen ends, and a searcher inserted at loaders[1]
+-- killed the game there, before a single timer tick, every time. All
+-- writes here are scoped to OUR module names in package.loaded only.
+--
+-- DEV_ORDER lists PASSIVE modules (top-level = requires + table building,
+-- no engine calls, no init) in dependency order. The two orchestrators
+-- (aai_battle_state, custom_bridge) run code at top level, so they are
+-- loaded directly by the kernel/payload instead (dev_chunk below).
+local DEV_ORDER = {
+	"aai_json", "battle/db_abilities", "battle/native", "battle/db",
+	"battle/api", "battle/publish", "battle/probe", "battle/harness",
+};
+local FAMILY = { "aai_json", "battle/db_abilities", "battle/native",
+	"battle/db", "battle/api", "battle/publish", "battle/probe",
+	"battle/harness", "aai_battle_state", "custom_bridge" };
+
+local function dev_path(name)
+	return "data/aai_dev/" .. string.gsub(name, "%.", "/") .. ".lua";
+end;
+
+-- compiled chunk of a dev copy, or nil if absent/broken (reason logged)
+local function dev_chunk(name)
+	local fh = io.open(dev_path(name), "r");
 	if not fh then
-		return nil;					-- no dev copy -> next loader (the pack)
+		return nil;
 	end;
 	local src = fh:read("*a");
 	fh:close();
-	local chunk, err = loadstring(src, "@" .. path);
+	local chunk, cerr = loadstring(src, "@" .. dev_path(name));
 	if not chunk then
-		return "\n\tdev copy broken: " .. tostring(err);
+		w("  dev copy BROKEN " .. name .. ": " .. tostring(cerr));
+		return nil;
 	end;
 	return chunk;
 end;
-try("dev-loader", function()
-	if type(package) == "table" and type(package.loaders) == "table" then
-		table.insert(package.loaders, 1, dev_loader);
-		local probe = io.open("data/aai_dev/custom_bridge.lua", "r");
-		if probe then
-			probe:close();
-			w("  dev shadow ACTIVE (data/aai_dev/ present)");
-		else
-			w("  dev shadow idle (no data/aai_dev/ copies; pack modules load)");
+
+local function family_clear()
+	if type(package) ~= "table" or type(package.loaded) ~= "table" then
+		return;
+	end;
+	for _, name in ipairs(FAMILY) do
+		package.loaded[name] = nil;
+	end;
+end;
+
+local function dev_prestuff()
+	local n = 0;
+	for _, name in ipairs(DEV_ORDER) do
+		local chunk = dev_chunk(name);
+		if chunk then
+			local ok, mod = pcall(chunk);
+			if ok then
+				package.loaded[name] = (mod == nil) and true or mod;
+				n = n + 1;
+			else
+				w("  dev copy ERROR " .. name .. ": " .. tostring(mod));
+			end;
 		end;
 	end;
-end);
+	return n;
+end;
 
 -- ---- 5. kernel phase tracker + event snapshot -------------------------
 -- The kernel owns phase truth in _G.aai_phase; modules seed their local
@@ -220,14 +260,24 @@ local function payload_teardown()
 	rawset(_G, "aai_pub_kick", nil);
 	rawset(_G, "aai_harness_tick", nil);
 	rawset(_G, "aai_probe_tick", nil);
-	pcall(function()
-		package.loaded[PAYLOAD_NAME] = nil;
-	end);
+	pcall(family_clear);
 end;
 
 local function payload_load(tag)
-	local ok, err = pcall(require, PAYLOAD_NAME);
-	w("  payload [" .. tag .. "] -> " .. (ok and "OK" or tostring(err)));
+	local stuffed = 0;
+	pcall(function() stuffed = dev_prestuff(); end);
+	local ok, err;
+	local chunk = dev_chunk(PAYLOAD_NAME);
+	if chunk then
+		ok, err = pcall(chunk);
+		if ok then
+			pcall(function() package.loaded[PAYLOAD_NAME] = true; end);
+		end;
+	else
+		ok, err = pcall(require, PAYLOAD_NAME);
+	end;
+	w("  payload [" .. tag .. "] dev=" .. stuffed .. " -> "
+		.. (ok and "OK" or tostring(err)));
 	return ok, err;
 end;
 

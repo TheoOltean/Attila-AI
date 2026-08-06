@@ -109,7 +109,10 @@ function M.init(core)
 	end;
 
 	local status = read_all(STATUS) or "";
-	if string.find(status, "ARMED", 1, true) then
+	-- string.sub, NOT string.find: on 2026-08-05 find(status,"ARMED",1,true)
+	-- failed against a status that printed as "ARMED" -- this Lua build is
+	-- not stock, so the check uses the dumbest possible primitive
+	if string.sub(status, 1, 5) == "ARMED" then
 		core.log("ATTACH-ARM armed -- kernel bring-up clears the inflight marker");
 		-- marker stays: only the chunk kernel may release the breaker
 	else
@@ -119,8 +122,8 @@ function M.init(core)
 				.. "rebuild native) -- breaker idle this battle");
 		else
 			core.log("ATTACH-ARM refused: "
-				.. string.gsub(status, "%s+$", "") .. " (normal outside "
-				.. "custom battles; lever kept)");
+				.. string.gsub(status, "%s+$", "") .. " len=" .. #status
+				.. " (normal outside custom battles; lever kept)");
 		end;
 	end;
 end;

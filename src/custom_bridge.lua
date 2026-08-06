@@ -457,23 +457,33 @@ rawset(_G, "aai_env", getfenv(1));
 api.battery("bridge@load");
 
 -- ---- bring up the module stack ----------------------------------------
+-- (module-family clearing + dev pre-stuff are the KERNEL's job -- by the
+-- time this runs, package.loaded already holds the dev copies, so the
+-- requires below and inside aai_battle_state hit the cache. NEVER touch
+-- package.loaders/require here: shared engine plumbing, see the kernel.)
 if not string.find(package.path, "data/aai/?.lua", 1, true) then
 	package.path = package.path .. ";data/aai/?.lua";
 end;
 
--- fresh module state every (re)load: the whole family re-reads from disk
--- (dev copies first via the kernel's shadow loader)
-pcall(function()
-	if type(package) == "table" and type(package.loaded) == "table" then
-		for _, name in ipairs({ "aai_battle_state", "battle/api",
-				"battle/publish", "battle/probe", "battle/harness",
-				"battle/native", "battle/db", "battle/db_abilities" }) do
-			package.loaded[name] = nil;
+-- the orchestrator runs code at top level, so it loads like the payload
+-- itself: dev copy via stdio when present, else the pack
+local ok, err;
+local fh = io.open("data/aai_dev/aai_battle_state.lua", "r");
+if fh then
+	local src = fh:read("*a");
+	fh:close();
+	local chunk, cerr = loadstring(src, "@data/aai_dev/aai_battle_state.lua");
+	if chunk then
+		ok, err = pcall(chunk);
+		if ok then
+			pcall(function() package.loaded["aai_battle_state"] = true; end);
 		end;
+	else
+		ok, err = false, cerr;
 	end;
-end);
-
-local ok, err = pcall(require, "aai_battle_state");
+else
+	ok, err = pcall(require, "aai_battle_state");
+end;
 if not ok then
 	log("MODULE STACK FAILED: " .. tostring(err));
 	error("custom_bridge: module stack failed: " .. tostring(err), 0);
