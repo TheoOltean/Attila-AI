@@ -58,6 +58,30 @@ if rawget(_G, "aai_stack_up") then
 	return;
 end;
 
+-- TIMER-DISPATCH BISECT (2026-08-05): the dispatch serviced run 5's
+-- registration (coastal, 10k+ ticks) but services NOTHING on run 6
+-- (plains AND coastal, repeating AND singleshot). Lever data/aai_run5.txt
+-- replays the VERIFIED run-5 chunk byte-for-byte (src/aai_run5.lua =
+-- git b36a7e5) on this install: ticks there => the regression is run-6
+-- kernel content; dead there => it is outside the chunk (DLL rebuild /
+-- installer io / environment).
+local r5 = io.open("data/aai_run5.txt", "r");
+if r5 then
+	r5:close();
+	w("");
+	w("==== RUN5-MODE (data/aai_run5.txt): executing aai_run5.lua verbatim ====");
+	local fn5, ferr5 = loadfile("data/aai/aai_run5.lua");
+	if fn5 then
+		local okr, rerr = pcall(fn5);
+		if not okr then
+			w("  run5-mode ERROR: " .. tostring(rerr));
+		end;
+	else
+		w("  run5-mode loadfile FAILED: " .. tostring(ferr5));
+	end;
+	return;
+end;
+
 w("");
 w("==== aai_attach.lua RUN 6 -- KERNEL ====");
 try("time", function() w("time: " .. os.date("%Y-%m-%d %H:%M:%S")); end);
