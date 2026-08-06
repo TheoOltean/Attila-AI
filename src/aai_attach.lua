@@ -358,6 +358,27 @@ else
 	end);
 	w("  register_repeating_timer(aai_custom_tick, 100) -> " ..
 		(okt and "OK" or ("ERR " .. tostring(errt))));
+
+	-- TIMER-DISPATCH BISECT (2026-08-05): the Plains land battle serviced
+	-- ZERO ticks all battle while yesterday's coastal battle ticked 10k+.
+	-- Lever data/aai_ss_probe.txt adds a singleshot registration to split
+	-- "dispatch dead" from "repeating broken". DEFAULT OFF and keep it off
+	-- in working battles: a SECOND registration is the campaign kill
+	-- pattern (timer law) and would contaminate a clean A/B.
+	local ss = io.open("data/aai_ss_probe.txt", "r");
+	if ss then
+		ss:close();
+		rawset(_G, "aai_single_probe", function()
+			pcall(function()
+				w("  SINGLESHOT fired clock=" .. tostring(os.clock()));
+			end);
+		end);
+		local oks, errs = pcall(function()
+			battle:register_singleshot_timer("aai_single_probe", 1500);
+		end);
+		w("  register_singleshot_timer(aai_single_probe, 1500) -> " ..
+			(oks and "OK" or ("ERR " .. tostring(errs))));
+	end;
 end;
 
 rawset(_G, "aai_stack_up", true);
