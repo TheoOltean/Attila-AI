@@ -175,7 +175,7 @@ enum { AAI_T_I32 = 0, AAI_T_F32 = 1 };
 typedef struct { int id; unsigned off; int type; } aai_field_t;
 static const aai_field_t AAI_FIELDS[] = {
     { 1, 0x0044, AAI_T_I32 },  /* men / strength (== number_of_men_alive)  CONFIRMED */
-    { 2, 0x1cb4, AAI_T_F32 },  /* fatigue [0..1]                          needs-confirm */
+    { 2, 0x1cb4, AAI_T_F32 },  /* fatigue [0..1]   LIVE-FALSIFIED 2026-07-29: reads 0 */
     { 3, 0x20cc, AAI_T_F32 },  /* ammo (current)                          needs-confirm */
     { 4, 0x20d0, AAI_T_I32 },  /* ammo max */
     { 5, 0x20d8, AAI_T_F32 },  /* ammo frac [0..1] */

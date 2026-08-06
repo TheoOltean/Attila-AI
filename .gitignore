@@ -6,10 +6,16 @@ reference/**
 !reference/**/*.md
 
 # scan state / build artifacts
-mem/aai_scan_state.pkl
 *.pack
 __pycache__/
 *.pyc
 
 # crash artifacts from shell invocations
 *.stackdump
+
+# Reverse engineering lives OUTSIDE this repo, in ../attila-re (a plain local
+# directory, not a git repo). Nothing game-derived comes back in here.
+/ghidra/
+/archive/
+/mem/
+/tools/aai_diff_correlate.py
