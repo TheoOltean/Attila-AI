@@ -11,7 +11,17 @@
 local M = {};
 
 -- Bump on ANY change to shapes/orders below (mirrors host/spec.py).
-M.SPEC_VERSION = "0.1.0";
+-- 0.2.0: battle-type one-hot cut 6 -> 3 (Theo 2026-08-09); global[40]
+-- compacted from idx 6 down, so weather/counts/VP/spare all moved.
+-- 0.3.0: clock semantics (layout unchanged) -- global 0/1 normalize by the
+-- BATTLE'S OWN time limit (remaining_conflict_time at conflict start), not
+-- a flat 1800; NORM.TIME_S is now only the fallback for unlimited-time
+-- battles. Elapsed excludes the deployment phase.
+-- 0.4.0: weather block [6,10) -> [6,11). The engine enum is None/Rain/Snow/
+-- Dust with a separate severity 0..2 (RE 2026-08-09: weather-definition
+-- +0x1c/+0x20) -- there is no fog, so that slot is now DUST, and severity
+-- joins as a scalar. global[40] re-compacted from idx 10 down.
+M.SPEC_VERSION = "0.4.0";
 
 -- Decision cadence: one observation out + one action frame in per second.
 M.DECISION_TICK_S = 1.0;
@@ -55,20 +65,35 @@ M.FEAT = {
 };
 
 -- global[40] section boundaries ([lo, hi); field-by-field layout in ML_DESIGN.md):
---	0 time elapsed /1800 - 1 time remaining /1800 - 2 we are attacker
---	[3,9) battle-type one-hot - [9,13) weather one-hot
---	13/14 men alive own/enemy (/initial) - 15/16 men initial (/6400)
---	17/18 units alive own/enemy (/40) - [19,34) victory points 3x5
---	[34,40) spare
+--	0 time elapsed - 1 time remaining (both / the battle's own time limit;
+--	  NORM.TIME_S only when the battle is unlimited) - 2 we are attacker
+--	[3,6) battle-type one-hot - [6,10) weather one-hot - 10 weather severity
+--	11/12 men alive own/enemy (/initial) - 13/14 men initial (/6400)
+--	15/16 units alive own/enemy (/40) - [17,32) victory points 3x5
+--	[32,40) spare
 M.GLOBAL = {
-	BATTLE_TYPE = { 3, 9 };
-	WEATHER = { 9, 13 };
-	VP = { 19, 34 };		-- 3 slots x (exists, owner ours/theirs/neutral, progress)
-	SPARE = { 34, 40 };
+	BATTLE_TYPE = { 3, 6 };
+	WEATHER = { 6, 11 };	-- [6,10) one-hot + 10 severity (/2)
+	WEATHER_ONEHOT = { 6, 10 };
+	WEATHER_SEVERITY = 10;
+	VP = { 17, 32 };		-- 3 slots x (exists, owner ours/theirs/neutral, progress)
+	SPARE = { 32, 40 };
 };
 
 -- Vocab orders. Index order is LOAD-BEARING (= one-hot / multi-hot bit order
 -- and head output order); never reorder without a SPEC_VERSION bump.
+
+-- Battle-type one-hot order (global[3..5]). All three are structure facts:
+-- settlement-vs-field and walled-vs-unwalled both fall out of the structures
+-- scan, so they unlock together, from one source.
+M.BATTLE_TYPES = { "unwalled_settlement", "walled_settlement", "field_battle" };
+
+-- Weather one-hot order (global[6..9]), then severity as a scalar at 10.
+-- These are the ENGINE's categories, not a guess: the weather-definition
+-- object carries type @+0x1c against the string list "None,Rain,Snow,Dust"
+-- and severity @+0x20 registered over 0..2 (RE 2026-08-09). "clear" is the
+-- engine's None. There is no fog category in Attila.
+M.WEATHER_TYPES = { "clear", "rain", "snow", "dust" };
 
 M.STANCES = {
 	"fire_at_will", "melee_mode", "skirmish", "defend", "formed_attack",
@@ -162,8 +187,11 @@ M.ARG_TOKENS = {
 -- Elevation = (z - map_min_z) / ELEV_M.
 M.NORM = {
 	-- global
-	TIME_S = 1800,			-- [G]
+	TIME_S = 1800,			-- [G] FALLBACK ONLY: used when a battle has no
+							-- time limit. Limited battles normalize the clock
+							-- by their own limit (see read/global.lua).
 	MEN_TOTAL = 6400,		-- 40 units x 160 DB-max men
+	WEATHER_SEVERITY = 2,	-- engine registers severity over 0..2
 	-- live state
 	ELEV_M = 100,			-- [G divisor]
 	MORALE = 100,			-- [G scale unknown]

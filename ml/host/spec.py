@@ -6,7 +6,13 @@ drifted mirror at handshake instead of letting it silently mis-decode.
 Data only -- no IO, no numpy.
 """
 
-SPEC_VERSION = "0.1.0"  # bump with game/spec.lua, always together
+SPEC_VERSION = "0.4.0"  # bump with game/spec.lua, always together
+# 0.2.0: battle-type one-hot cut 6 -> 3 (Theo 2026-08-09); global[40]
+# compacted from idx 6 down, so weather/counts/VP/spare all moved.
+# 0.3.0: clock semantics (layout unchanged) -- global 0/1 normalize by the
+# battle's own time limit, not a flat 1800; elapsed excludes deployment.
+# 0.4.0: weather [6,10) -> [6,11). Engine enum is None/Rain/Snow/Dust plus a
+# severity 0..2 (RE 2026-08-09) -- no fog; that slot is DUST. Re-compacted.
 
 DECISION_TICK_S = 1.0
 

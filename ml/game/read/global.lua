@@ -1,17 +1,30 @@
 -------------------------------------------------------------------------
 --	ml/game/read/global.lua -- the global[40] assembler.
 --
---	Layout (spec.GLOBAL + ML_DESIGN.md): time elapsed/remaining (/1800),
---	attacker bit, battle-type one-hot [3,9), weather one-hot [9,13),
---	men+unit counts [13,19), victory points [19,34), spare [34,40).
+--	Layout (spec.GLOBAL + ML_DESIGN.md, spec 0.4.0): time elapsed/remaining,
+--	attacker bit, battle-type one-hot [3,6), weather one-hot [6,10) +
+--	severity 10, men+unit counts [11,17), victory points [17,32),
+--	spare [32,40).
 --	Clock source law: remaining_conflict_time() is the authoritative
 --	battle clock (tick-derived time drifts under speed changes).
 --
+--	NOTE: this file LAGS the bench copy being mined on `main`
+--	(src/mlread/global.lua). Layout/indices here are current for spec
+--	0.4.0, but the clock still uses the old flat NORM.TIME_S divisor and
+--	there is no provenance/diagnostics surface. It gets REPLACED wholesale
+--	by the bench copy once that is verified in-game -- do not hand-merge.
+--
 --	Harvested fields are LIVE below; unharvested stay zero, each gap
---	carrying its provider seed. "Own" = the player alliance for now
---	(local_alliance(), read fresh per tick from pump context); when the
---	controlled-side decision lands it must be pinned in ONE place and
---	this module re-pointed at it.
+--	carrying its provider seed.
+--
+--	SIDE SEMANTICS (Theo 2026-08-09 -- the controlled-side decision, now
+--	landed and pinned HERE): "own" is the AI army, the side the model
+--	plays; "enemy" is the human player. local_alliance() names the
+--	PLAYER's alliance, so own is the other one. Whether that index is 0-
+--	or 1-based against the 1-indexed alliances list is undocumented and
+--	both readings are in range in the 2-alliance case -- the bench build
+--	on main breaks every alliance out for confirmation before this is
+--	treated as settled.
 -------------------------------------------------------------------------
 
 local spec = require "ml/spec";
@@ -53,10 +66,14 @@ function M.build()
 
 	-- idx 2: attacker bit -- not harvested (candidate: local_alliance()==1
 	-- observed once on an attacker-side battle, UNVERIFIED as a rule).
-	-- [3,9): battle-type one-hot -- not harvested (taxonomy [G], source open).
-	-- [9,13): weather one-hot -- not harvested (T3 not yet readable).
+	-- [3,6): battle-type one-hot -- not harvested. All three types are
+	-- structure facts (settlement-vs-field, walled-vs-unwalled), so they
+	-- unlock together once read/structures.lua lands.
+	-- [6,10) weather one-hot + 10 severity -- not harvested. Engine enum
+	-- is None/Rain/Snow/Dust with severity 0..2 (RE 2026-08-09); the live
+	-- instance is a native (T3) read, not Lua.
 
-	-- [13,19): men + unit counts via the T1 alliance walk
+	-- [11,17): men + unit counts via the T1 alliance walk
 	-- (battle -> alliances -> armies -> units, 1-indexed item()).
 	local la = plua.read(b, "local_alliance");
 	local alliances = plua.read(b, "alliances");
@@ -88,16 +105,17 @@ function M.build()
 				end;
 			end;
 		end;
-		if own_init > 0 then v[14] = util.clamp01(own_alive / own_init); end;
-		if en_init > 0 then v[15] = util.clamp01(en_alive / en_init); end;
-		v[16] = util.clamp01(own_init / spec.NORM.MEN_TOTAL);
-		v[17] = util.clamp01(en_init / spec.NORM.MEN_TOTAL);
-		v[18] = util.clamp01(own_units / spec.MAX_FRIENDLY);
-		v[19] = util.clamp01(en_units / spec.MAX_ENEMY);
+		-- array pos p = spec idx p-1, so spec [11,17) is v[12..17]
+		if own_init > 0 then v[12] = util.clamp01(own_alive / own_init); end;
+		if en_init > 0 then v[13] = util.clamp01(en_alive / en_init); end;
+		v[14] = util.clamp01(own_init / spec.NORM.MEN_TOTAL);
+		v[15] = util.clamp01(en_init / spec.NORM.MEN_TOTAL);
+		v[16] = util.clamp01(own_units / spec.MAX_FRIENDLY);
+		v[17] = util.clamp01(en_units / spec.MAX_ENEMY);
 	end;
 
-	-- [19,34): victory points -- not harvested (T5; events never deliver,
-	-- Lua getters nil). [34,40): spare, zero by definition.
+	-- [17,32): victory points -- not harvested (T5; events never deliver,
+	-- Lua getters nil). [32,40): spare, zero by definition.
 	return v;
 end;
 

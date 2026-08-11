@@ -27,30 +27,30 @@ BAR_W = 24
 # Display labels for global[40] (presentation only -- layout truth is
 # spec + ML_DESIGN). harvested=False rows carry the '·' marker: expected
 # zero until their capability lands; a nonzero there is news.
-BATTLE_TYPES = ["open field", "walled siege", "unwalled settl",
-                "river crossing", "ambush", "coastal/mixed"]
-WEATHER = ["clear", "rain", "snow", "fog"]
+BATTLE_TYPES = ["unwalled settl", "walled settl", "field battle"]
+WEATHER = ["clear", "rain", "snow", "dust"]   # engine enum; no fog
 VP_PARTS = ["exists", "owner ours", "owner theirs", "owner neutral", "progress"]
 
 
 def rows() -> list[tuple[int, str, bool]]:
     r = [
-        (0, "time elapsed /1800", True),
-        (1, "time remaining /1800", True),
+        (0, "time elapsed /limit", True),
+        (1, "time remaining /limit", True),
         (2, "we are attacker", False),
     ]
     r += [(3 + i, f"battle type: {n}", False) for i, n in enumerate(BATTLE_TYPES)]
-    r += [(9 + i, f"weather: {n}", False) for i, n in enumerate(WEATHER)]
+    r += [(6 + i, f"weather: {n}", False) for i, n in enumerate(WEATHER)]
+    r += [(10, "weather severity /2", False)]
     r += [
-        (13, "own men alive /init", True),
-        (14, "enemy men alive /init", True),
-        (15, "own men initial /6400", True),
-        (16, "enemy men initial /6400", True),
-        (17, "own units alive /40", True),
-        (18, "enemy units alive /40", True),
+        (11, "own(AI) men alive /init", True),
+        (12, "enemy(player) men alive /init", True),
+        (13, "own(AI) men initial /6400", True),
+        (14, "enemy(player) men initial /6400", True),
+        (15, "own(AI) units alive /40", True),
+        (16, "enemy(player) units alive /40", True),
     ]
     for s in range(3):
-        r += [(19 + s * 5 + j, f"vp{s + 1}: {n}", False) for j, n in enumerate(VP_PARTS)]
+        r += [(17 + s * 5 + j, f"vp{s + 1}: {n}", False) for j, n in enumerate(VP_PARTS)]
     return r
 
 
@@ -87,9 +87,9 @@ def render(obs, age) -> list[str]:
         v = g[idx] if idx < len(g) else None
         mark = " " if harvested else "·"
         lines.append(f" {idx:>2} {mark} {label:<27} {fmt(v)}  |{bar(v)}|")
-    spare = [g[i] if i < len(g) else None for i in range(34, 40)]
+    spare = [g[i] if i < len(g) else None for i in range(32, 40)]
     nz = sum(1 for v in spare if isinstance(v, (int, float)) and v != 0)
-    lines.append(f" 34-39 · spare {'(all zero)' if nz == 0 else f'NONZERO x{nz}':<38}")
+    lines.append(f" 32-39 · spare {'(all zero)' if nz == 0 else f'NONZERO x{nz}':<38}")
     lines.append(" " + "-" * (WIDTH - 2))
     lines.append(" · = not harvested yet (expected zero)")
     return lines
